@@ -1,0 +1,9 @@
+# Weights are release assets, never git objects. A 200 MB .pt committed here
+# would be in every clone for ever, and git has no way to forget it.
+*.pt
+*.pth
+*.onnx
+*.engine
+
+__pycache__/
+*.py[cod]

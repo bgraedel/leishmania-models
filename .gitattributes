@@ -1,0 +1,16 @@
+# The working tree here is a mix of CRLF and LF, because it grew on Windows and
+# the editors disagreed. Normalise in the repository so a diff shows what
+# changed rather than which machine touched it last; `core.autocrlf` then only
+# decides what each checkout gets.
+* text=auto eol=lf
+
+# Binary, or Git's line-ending heuristics will corrupt them.
+*.pt binary
+*.npy binary
+*.dat binary
+*.parquet binary
+*.joblib binary
+*.png binary
+*.tif binary
+*.nd2 binary
+*.mp4 binary
