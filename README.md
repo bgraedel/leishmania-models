@@ -3,10 +3,10 @@
 Trained weights for *Leishmania* imaging, published as release assets with an
 index that records how each model should be run.
 
-Detection, pose and segmentation models all live here, brightfield and
-fluorescence alike. Each entry carries its own inference settings, keypoint
-layout and acquisition assumptions, so a model can be used correctly without
-anyone having to remember what it was trained on.
+Any framework, any task: ultralytics, cellpose, HuggingFace transformers, ONNX,
+brightfield or fluorescence. Each entry names what loads it and carries its own
+inference settings, preprocessing and acquisition assumptions, so a model can be
+used correctly without anyone having to remember what it was trained on.
 
 ## Using them
 
