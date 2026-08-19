@@ -128,10 +128,18 @@ def main(argv: list[str] | None = None) -> int:
               f"{task} model is listed and downloadable there, but cannot be "
               "set as a project's detector.")
 
+    if not task:
+        print("\nwarning: no task recorded. The picker shows it, and trackanno uses"
+              "\n  it to decide whether it can drive the model. Pass --task.")
+
     print("\nNext, on GitHub:")
     print(f"  1. create a release tagged {args.version}")
-    print(f"  2. upload {args.weights.name} and index.json as its assets")
-    print(f"  3. commit index.json here too, so the repo records what was published")
+    print(f"  2. upload BOTH {args.weights.name} and index.json as its assets.")
+    print("     index.json HAS to be an asset: the registry URL points at")
+    print("     releases/latest/download/index.json, so a committed copy alone")
+    print("     is not fetchable.")
+    print("  3. commit index.json here as well, so the repository records what")
+    print("     was published and the next publish starts from it.")
     return 0
 
 

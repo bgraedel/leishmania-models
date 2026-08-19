@@ -38,6 +38,18 @@ stops that happening by accident.
 
 ## Adding a model
 
+Run `publish.py` with **trackanno's own interpreter**, so it can read the
+checkpoint for the task, keypoint count and training resolution. Any other
+Python still works, but then those have to come from the flags.
+
+```bash
+git clone https://github.com/bgraedel/leishmania-models
+cd leishmania-models
+
+# Windows; on macOS or Linux it is .venv/bin/python
+<trackanno>/.venv/Scripts/python.exe publish.py ...
+```
+
 ```bash
 # a detector
 python publish.py best.pt --id leishmania-detect --version v1 \
@@ -57,10 +69,17 @@ python publish.py best_seg.pt --id leishmania-seg-fluo --version v1 \
 ```
 
 The script reads the checkpoint for what it can (task, keypoint count, the
-`imgsz` it was trained at), hashes the file, and writes the entry. Then on
-GitHub: create a release tagged with the version, upload the weights and
-`index.json` as its assets, and commit `index.json` here so the repository
-records what was published.
+`imgsz` it was trained at), hashes the file, and writes the entry with the
+release URL already filled in. Then, on GitHub:
+
+1. create a release tagged with the version;
+2. upload **both** the weights and `index.json` as its assets;
+3. commit `index.json` here as well, and push.
+
+Step 2 is the one to get right. The registry URL points at
+`releases/latest/download/index.json`, so `index.json` has to be a release
+asset. A copy committed to the repository is a record of what was published,
+and is not what anyone fetches.
 
 ## What an entry says
 
