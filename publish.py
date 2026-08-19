@@ -66,7 +66,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="the .pt wherever it already lives; it is not copied "
                              "here, and never committed")
     parser.add_argument("--id", required=True, help="the name projects will use")
-    parser.add_argument("--version", required=True, help="also the release tag")
+    parser.add_argument("--version", required=True,
+                        help="this model's version, independent of the release")
+    parser.add_argument("--release", default="",
+                        help="the release tag the asset is uploaded to; defaults "
+                             "to --version. One release can hold several models")
     parser.add_argument("--notes", default="", help="one line, shown in the picker")
     parser.add_argument("--task", default="",
                         choices=["", "detect", "pose", "segment", "classify", "obb"],
@@ -93,12 +97,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pixel-size", type=float, nargs="*", default=None,
                         help="um per pixel; give two for a range, e.g. "
                              "--pixel-size 0.2 0.65 for a multi-scale model")
+    parser.add_argument("--magnification", type=float, nargs="*", default=None,
+                        help="objectives it was trained on, e.g. 20 40 60 100")
     args = parser.parse_args(argv)
 
     if not args.weights.is_file():
         print(f"error: {args.weights} is not a file", file=sys.stderr)
         return 2
 
+    release = args.release or args.version
     print(f"hashing {args.weights.name} ...")
     sha = digest(args.weights)
     size = args.weights.stat().st_size
@@ -133,7 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         return values[0] if len(values) == 1 else sorted(values)
 
     assumes = {k: v for k, v in (("fps", scale(args.fps)),
-                                 ("pixel_size_um", scale(args.pixel_size))) if v}
+                                 ("pixel_size_um", scale(args.pixel_size)),
+                                 ("magnification", scale(args.magnification))) if v}
 
     preprocess = {}
     if args.preprocess:
@@ -148,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         "task": task,
         "modality": args.modality,
         "framework": args.framework,
-        "url": f"https://github.com/{REPO}/releases/download/{args.version}/{args.weights.name}",
+        "url": f"https://github.com/{REPO}/releases/download/{release}/{args.weights.name}",
         "sha256": sha,
         "size": size,
         "notes": args.notes,
@@ -158,9 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     index = json.loads(INDEX.read_text(encoding="utf-8")) if INDEX.exists() else {"models": []}
-    models = [m for m in index.get("models", []) if m.get("id") != args.id]
+    # Keyed by (id, version), so one id can offer several versions and a
+    # project that pinned an older one keeps resolving to it.
+    models = [m for m in index.get("models", [])
+              if (m.get("id"), m.get("version")) != (args.id, args.version)]
     models.append(entry)
-    index["models"] = sorted(models, key=lambda m: m["id"])
+    index["models"] = sorted(models, key=lambda m: (m["id"], m.get("version", "")))
     INDEX.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
 
     print(f"\nwrote {INDEX.name}: {args.id} {args.version}, {size / 1e6:.1f} MB")
@@ -174,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
               "\n  it to decide whether it can drive the model. Pass --task.")
 
     print("\nNext, on GitHub:")
-    print(f"  1. create a release tagged {args.version}")
+    print(f"  1. create a release tagged {release}")
     print(f"  2. upload BOTH {args.weights.name} and index.json as its assets.")
     print("     index.json HAS to be an asset: the registry URL points at")
     print("     releases/latest/download/index.json, so a committed copy alone")

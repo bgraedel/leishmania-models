@@ -1,3 +1,278 @@
 {
-  "models": []
+  "models": [
+    {
+      "id": "leishmania-m2f-1024",
+      "version": "v1",
+      "task": "segment",
+      "modality": "phase",
+      "framework": "hf-transformers",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v1/leishmania-m2f-swin-s-1024.zip",
+      "sha256": "f00d40505613ae6eba494ef57fd618dad5fa8cb92cc39f9584e8004580dfda7b",
+      "size": 275391360,
+      "notes": "Mask2Former Swin-S, 1024 px at 2x native. 2 classes (body, flagellum). mAP50 0.924, mAP50-95 0.637",
+      "config": {
+        "detection": {
+          "task": "segment"
+        }
+      },
+      "preprocess": {
+        "image_processor": "Mask2FormerImageProcessor",
+        "input_size": [
+          1024,
+          1024
+        ],
+        "do_resize": false,
+        "do_rescale": true,
+        "rescale_factor": 0.00392156862745098,
+        "do_normalize": true,
+        "image_mean": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "image_std": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "size_divisor": 32,
+        "ignore_index": 255,
+        "channels": 3,
+        "native_scale_factor": 2,
+        "note": "images are upsampled 2x from native before tiling into 1024 px; the processor does not resize"
+      },
+      "assumes": {
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
+      "id": "leishmania-m2f-512-amodal",
+      "version": "v1",
+      "task": "segment",
+      "modality": "phase",
+      "framework": "hf-transformers",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v1/leishmania-m2f-swin-b-512-amodal.zip",
+      "sha256": "9d5b44e0f54111984cb308a1b152d0bd40a60d0e238ca7e844d31653a9b0d155",
+      "size": 427979066,
+      "notes": "Mask2Former Swin-B, amodal, 512 px at native resolution. 2 classes (body, flagellum). mAP50 0.903, mAP50-95 0.605",
+      "config": {
+        "detection": {
+          "task": "segment"
+        }
+      },
+      "preprocess": {
+        "image_processor": "Mask2FormerImageProcessor",
+        "input_size": [
+          512,
+          512
+        ],
+        "do_resize": false,
+        "do_rescale": true,
+        "rescale_factor": 0.00392156862745098,
+        "do_normalize": true,
+        "image_mean": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "image_std": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "size_divisor": 32,
+        "ignore_index": 255,
+        "channels": 3,
+        "native_scale_factor": 1,
+        "note": "native resolution, tiled at 512 px; the processor does not resize"
+      },
+      "assumes": {
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
+      "id": "leishmania-pose",
+      "version": "v1",
+      "task": "pose",
+      "modality": "phase",
+      "framework": "ultralytics",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v1/best_pose_old.pt",
+      "sha256": "7ff2365cbb4aec42a3de5556592aa0aa52743332033d65c52b4e4ae66d2a2496",
+      "size": 377316785,
+      "notes": "yolo26x-pose, previous training run. 2026-07-16",
+      "config": {
+        "detection": {
+          "imgsz": 1280,
+          "task": "pose"
+        },
+        "tiling": {
+          "tile": 1280,
+          "overlap": 192
+        },
+        "keypoints": {
+          "nodes": [
+            "Head",
+            "Base",
+            "Flag1",
+            "Flag2",
+            "Flag3",
+            "Flag4",
+            "Flag5",
+            "Tip"
+          ],
+          "edges": [
+            [
+              "Head",
+              "Base"
+            ],
+            [
+              "Base",
+              "Flag1"
+            ],
+            [
+              "Flag1",
+              "Flag2"
+            ],
+            [
+              "Flag2",
+              "Flag3"
+            ],
+            [
+              "Flag3",
+              "Flag4"
+            ],
+            [
+              "Flag4",
+              "Flag5"
+            ],
+            [
+              "Flag5",
+              "Tip"
+            ]
+          ]
+        }
+      },
+      "preprocess": {},
+      "assumes": {
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
+      "id": "leishmania-pose",
+      "version": "v2",
+      "task": "pose",
+      "modality": "phase",
+      "framework": "ultralytics",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v1/best_pose.pt",
+      "sha256": "1ab84d2ff55c60558ef45fec9ff8bd67c13bdb628ab368691b4467da7b72510a",
+      "size": 126354041,
+      "notes": "yolo26x-pose, 8-point flagellum chain, 1 class (cell). 2026-07-25",
+      "config": {
+        "detection": {
+          "imgsz": 1280,
+          "task": "pose"
+        },
+        "tiling": {
+          "tile": 1280,
+          "overlap": 192
+        },
+        "keypoints": {
+          "nodes": [
+            "Head",
+            "Base",
+            "Flag1",
+            "Flag2",
+            "Flag3",
+            "Flag4",
+            "Flag5",
+            "Tip"
+          ],
+          "edges": [
+            [
+              "Head",
+              "Base"
+            ],
+            [
+              "Base",
+              "Flag1"
+            ],
+            [
+              "Flag1",
+              "Flag2"
+            ],
+            [
+              "Flag2",
+              "Flag3"
+            ],
+            [
+              "Flag3",
+              "Flag4"
+            ],
+            [
+              "Flag4",
+              "Flag5"
+            ],
+            [
+              "Flag5",
+              "Tip"
+            ]
+          ]
+        }
+      },
+      "preprocess": {},
+      "assumes": {
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
+      "id": "leishmania-seg",
+      "version": "v1",
+      "task": "segment",
+      "modality": "phase",
+      "framework": "ultralytics",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v1/leishmania-seg-yolo26m.pt",
+      "sha256": "d380e1c92be7e58524e168790df9d59cfb08b6665de1aff2d27f7b266caddf35",
+      "size": 54479025,
+      "notes": "yolo26m-seg, 3 classes (animal, body, flagellum). mask mAP50 0.968, mAP50-95 0.654",
+      "config": {
+        "detection": {
+          "imgsz": 640,
+          "task": "segment"
+        },
+        "tiling": {
+          "tile": 640,
+          "overlap": 96
+        }
+      },
+      "preprocess": {},
+      "assumes": {
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    }
+  ]
 }
