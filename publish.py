@@ -55,7 +55,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--id", required=True, help="the name projects will use")
     parser.add_argument("--version", required=True, help="also the release tag")
     parser.add_argument("--notes", default="", help="one line, shown in the picker")
-    parser.add_argument("--task", default="", choices=["", "detect", "pose"])
+    parser.add_argument("--task", default="",
+                        choices=["", "detect", "pose", "segment", "classify", "obb"],
+                        help="usually read from the checkpoint; override if it is wrong")
+    parser.add_argument("--modality", default="",
+                        help="brightfield, fluorescence, phase, ... shown in the picker")
     parser.add_argument("--imgsz", type=int, default=0)
     parser.add_argument("--conf", type=float, default=None)
     parser.add_argument("--tile", type=int, default=0)
@@ -102,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "id": args.id,
         "version": args.version,
         "task": task,
+        "modality": args.modality,
         "url": f"https://github.com/{REPO}/releases/download/{args.version}/{args.weights.name}",
         "sha256": sha,
         "size": size,
@@ -118,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\nwrote {INDEX.name}: {args.id} {args.version}, {size / 1e6:.1f} MB")
     print(f"  sha256 {sha}")
+    if task and task not in ("detect", "pose"):
+        print("\nnote: trackanno drives detect and pose models. A "
+              f"{task} model is listed and downloadable there, but cannot be "
+              "set as a project's detector.")
+
     print("\nNext, on GitHub:")
     print(f"  1. create a release tagged {args.version}")
     print(f"  2. upload {args.weights.name} and index.json as its assets")
