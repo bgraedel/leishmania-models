@@ -85,35 +85,55 @@ and is not what anyone fetches.
 
 ```json
 {
-  "id": "leishmania-pose", "version": "v1", "task": "pose", "modality": "brightfield",
+  "id": "leishmania-pose", "version": "v1",
+  "framework": "ultralytics", "task": "pose", "modality": "brightfield",
   "url": ".../releases/download/v1/best_pose.pt",
   "sha256": "9f3c...", "size": 52428800,
-  "notes": "8-point flagellum, brightfield 20x",
+  "notes": "8-point flagellum, 20x",
   "config": {
     "detection": {"imgsz": 1280, "task": "pose"},
     "tiling": {"tile": 640, "overlap": 96},
     "keypoints": {"nodes": ["Head", "Base", "..."], "edges": [["Head", "Base"]]}},
+  "preprocess": {},
   "assumes": {"fps": 100, "pixel_size_um": 0.325}
 }
 ```
 
-`config` is the reason this is a repository rather than a folder of checkpoints.
-A checkpoint reports its task, keypoint count and class names, and those are read
-from the file directly. It cannot report the keypoint **names**, the skeleton
-**edges**, the resolution it was validated at, or a tile size that suits it, and
-those are most of what is otherwise typed in by hand for every new project. Only
-inference settings may appear there: a model says how it should be run, and
-nothing about where anyone's data lives.
+| field | meaning |
+|---|---|
+| `framework` | what loads the file: `ultralytics`, `cellpose`, `hf-transformers`, `onnx`, ... |
+| `task` | `detect`, `pose`, `segment`, `classify`, `obb` |
+| `modality` | `brightfield`, `fluorescence`, `phase`, ... |
+| `sha256` | verified on download and pinned by the project that uses it |
+| `config` | keyed by consumer; a reader takes its own key and ignores the rest |
+| `preprocess` | how pixels reach the model: input size, normalisation, channels |
+| `assumes` | the acquisition it was trained on |
 
-`assumes` is never applied. It becomes a warning where a project's movies were
-acquired differently, since only the person knows whether a change of frame rate
-or magnification is the experiment or a mistake.
+`config` and `preprocess` are carried verbatim. Only the consumer interprets
+them, so a cellpose entry can put `diameter` and `flow_threshold` under
+`config.cellpose` and a trackanno entry puts `imgsz` under `config.detection`,
+without either having to know about the other.
 
-`modality` and `task` are for choosing. trackanno drives `detect` and `pose`
-models; a `segment` or `classify` model is listed, described and downloadable
-there, and marked as one it cannot set as a project's detector. An index that
-quietly omitted half its contents would be worse than one that says what it
-holds and which parts are for other tools.
+`assumes` takes a number or a list. A model trained across magnifications says
+`"pixel_size_um": [0.2, 0.65]`, and a consumer checks whether the acquisition
+falls inside that instead of comparing against one value. Nothing in `assumes`
+is applied; it becomes a warning where a project disagrees.
+
+**Any framework works.** The index is a name, a digest and some free-form
+description, so what the bytes are is the consumer's problem. trackanno runs
+`ultralytics` `detect` and `pose` models, lists everything else with what it is,
+and declines to set it as a detector.
+
+Weights that are a directory rather than a file (HuggingFace, some cellpose
+setups) go up as a `.zip` or `.tar.gz`. It is fetched and verified like anything
+else; unpacking is the consumer's job.
+
+## Limits
+
+**2 GB per release asset**, which is GitHub's cap. A YOLO pose model is
+50-250 MB and a Swin-L Mask2Former around 800 MB, so this is rarely close.
+Releases do not count towards the repository size, which is why weights go there
+rather than into git.
 
 ## Versioning
 
