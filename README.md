@@ -53,19 +53,24 @@ cd leishmania-models
 ```bash
 # a detector
 python publish.py best.pt --id leishmania-detect --version v1 \
-    --modality brightfield --notes "promastigotes, 20x" \
+    --framework ultralytics --modality brightfield --notes "promastigotes, 20x" \
     --imgsz 1280 --tile 640 --overlap 96
 
 # a pose model, with the keypoint chain named
 python publish.py best_pose.pt --id leishmania-pose --version v1 \
-    --modality brightfield --notes "8-point flagellum, 20x" \
+    --framework ultralytics --modality brightfield --notes "8-point flagellum, 20x" \
     --imgsz 1280 --tile 640 --overlap 96 --fps 100 --pixel-size 0.325 \
     --nodes Head Base Flag1 Flag2 Flag3 Flag4 Flag5 Tip --chain
 
-# a segmentation model on fluorescence
-python publish.py best_seg.pt --id leishmania-seg-fluo --version v1 \
-    --task segment --modality fluorescence --notes "DAPI + phalloidin, 40x" \
-    --imgsz 1024
+# a cellpose model, trained across two magnifications
+python publish.py CP_20240101 --id leishmania-cyto --version v1 \
+    --framework cellpose --task segment --modality fluorescence \
+    --preprocess cellpose.json --pixel-size 0.2 0.65
+
+# a Mask2Former checkpoint from HuggingFace, zipped
+python publish.py m2f.tar.gz --id leishmania-m2f --version v1 \
+    --framework hf-transformers --task segment --modality fluorescence \
+    --preprocess m2f.json
 ```
 
 The script reads the checkpoint for what it can (task, keypoint count, the
