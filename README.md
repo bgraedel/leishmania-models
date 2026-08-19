@@ -3,9 +3,10 @@
 Trained weights for *Leishmania* imaging, published as release assets with an
 index that records how each model should be run.
 
-Detection and pose models both live here. Each entry carries its own inference
-settings, keypoint layout and acquisition assumptions, so a model can be used
-correctly without anyone having to remember what it was trained on.
+Detection, pose and segmentation models all live here, brightfield and
+fluorescence alike. Each entry carries its own inference settings, keypoint
+layout and acquisition assumptions, so a model can be used correctly without
+anyone having to remember what it was trained on.
 
 ## Using them
 
@@ -40,13 +41,19 @@ stops that happening by accident.
 ```bash
 # a detector
 python publish.py best.pt --id leishmania-detect --version v1 \
-    --notes "promastigotes, brightfield 20x" --imgsz 1280 --tile 640 --overlap 96
+    --modality brightfield --notes "promastigotes, 20x" \
+    --imgsz 1280 --tile 640 --overlap 96
 
 # a pose model, with the keypoint chain named
 python publish.py best_pose.pt --id leishmania-pose --version v1 \
-    --notes "8-point flagellum, brightfield 20x" \
+    --modality brightfield --notes "8-point flagellum, 20x" \
     --imgsz 1280 --tile 640 --overlap 96 --fps 100 --pixel-size 0.325 \
     --nodes Head Base Flag1 Flag2 Flag3 Flag4 Flag5 Tip --chain
+
+# a segmentation model on fluorescence
+python publish.py best_seg.pt --id leishmania-seg-fluo --version v1 \
+    --task segment --modality fluorescence --notes "DAPI + phalloidin, 40x" \
+    --imgsz 1024
 ```
 
 The script reads the checkpoint for what it can (task, keypoint count, the
@@ -59,7 +66,7 @@ records what was published.
 
 ```json
 {
-  "id": "leishmania-pose", "version": "v1", "task": "pose",
+  "id": "leishmania-pose", "version": "v1", "task": "pose", "modality": "brightfield",
   "url": ".../releases/download/v1/best_pose.pt",
   "sha256": "9f3c...", "size": 52428800,
   "notes": "8-point flagellum, brightfield 20x",
@@ -82,6 +89,12 @@ nothing about where anyone's data lives.
 `assumes` is never applied. It becomes a warning where a project's movies were
 acquired differently, since only the person knows whether a change of frame rate
 or magnification is the experiment or a mistake.
+
+`modality` and `task` are for choosing. trackanno drives `detect` and `pose`
+models; a `segment` or `classify` model is listed, described and downloadable
+there, and marked as one it cannot set as a project's detector. An index that
+quietly omitted half its contents would be worse than one that says what it
+holds and which parts are for other tools.
 
 ## Versioning
 
