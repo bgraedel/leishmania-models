@@ -24,6 +24,19 @@ Later runs are cache hits and never reach the network.
 Anything else can read the same index: it is plain JSON, and each entry gives a
 direct download URL and the digest to check it against.
 
+To just run a model, `examples/` has a script per model that does that for you.
+It fetches the weights, verifies them, runs the frames in tiles at the scale the
+model was trained on, and writes an overlay, an ImageJ label stack or a RoiSet:
+
+```bash
+uv run examples/pose.py cells.tif
+uv run examples/segment.py cells.tif --frames all --tiff labels.tif --rois masks.zip
+```
+
+Each script declares its own dependencies inline, so `uv run` needs nothing
+installed first; any Python works too, once those are on it. Windows, macOS and
+Linux — see [examples/README.md](examples/README.md).
+
 ## Layout
 
 | | |
@@ -31,6 +44,7 @@ direct download URL and the digest to check it against.
 | `index.json` | every model, its digest, and the settings it needs |
 | release assets | the weight files, one release per model version |
 | `publish.py` | builds an index entry from a checkpoint |
+| `examples/` | a script per model, taking its settings from the index |
 
 **Weights are release assets, never git objects.** A 200 MB checkpoint committed
 here would sit in every clone for ever, and git cannot forget it. `.gitignore`
