@@ -1,6 +1,41 @@
 {
   "models": [
     {
+      "id": "leishmania-detect",
+      "version": "v1",
+      "task": "detect",
+      "modality": "phase",
+      "framework": "ultralytics",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v2/leishmania-detect-yolo26m.pt",
+      "sha256": "2a3a8d29d7216da0d85cc9cc6d13b2ab16b294a25f080569d372ae522077f6d4",
+      "size": 44049561,
+      "notes": "yolo26m, 1 class (animal). mAP50 0.980, mAP50-95 0.845",
+      "config": {
+        "detection": {
+          "imgsz": 640,
+          "task": "detect"
+        },
+        "tiling": {
+          "tile": 640
+        }
+      },
+      "preprocess": {},
+      "assumes": {
+        "pixel_size_um": [
+          0.065,
+          0.1083,
+          0.1625,
+          0.325
+        ],
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
       "id": "leishmania-m2f-1024",
       "version": "v1",
       "task": "segment",
@@ -128,8 +163,7 @@
           "task": "pose"
         },
         "tiling": {
-          "tile": 1280,
-          "overlap": 192
+          "tile": 1280
         },
         "keypoints": {
           "nodes": [
@@ -206,8 +240,7 @@
           "task": "pose"
         },
         "tiling": {
-          "tile": 1280,
-          "overlap": 192
+          "tile": 1280
         },
         "keypoints": {
           "nodes": [
@@ -284,8 +317,7 @@
           "task": "segment"
         },
         "tiling": {
-          "tile": 640,
-          "overlap": 96
+          "tile": 640
         }
       },
       "preprocess": {},

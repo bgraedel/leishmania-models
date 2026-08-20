@@ -87,7 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--imgsz", type=int, default=0)
     parser.add_argument("--conf", type=float, default=None)
     parser.add_argument("--tile", type=int, default=0)
-    parser.add_argument("--overlap", type=int, default=0)
+    parser.add_argument("--overlap", type=float, default=0.0,
+                        help="tile overlap as a FRACTION of the tile, 0 to 0.9. "
+                             "Omit to leave the project default")
     parser.add_argument("--nodes", nargs="*", default=[], help="keypoint names, in model order")
     parser.add_argument("--chain", action="store_true",
                         help="wire the nodes 0-1, 1-2, ... which is a flagellum")
@@ -124,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
         detection["task"] = task
     if detection:
         config["detection"] = detection
+    if args.overlap and not 0.0 <= args.overlap < 0.9:
+        print(f"error: --overlap is a fraction of the tile, got {args.overlap}",
+              file=sys.stderr)
+        return 2
     tiling = {k: v for k, v in (("tile", args.tile), ("overlap", args.overlap)) if v}
     if tiling:
         config["tiling"] = tiling
