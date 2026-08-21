@@ -3,7 +3,7 @@
 
     python publish.py best_pose.pt --id leishmania-pose --version v1 \
         --framework ultralytics --modality brightfield \
-        --imgsz 1280 --tile 640 --overlap 96 --fps 100 --pixel-size 0.325 \
+        --imgsz 1280 --tile 640 --overlap 0.15 --fps 100 --pixel-size 0.325 \
         --nodes Head Base Flag1 Flag2 Flag3 Flag4 Flag5 Tip --chain
 
 Ultralytics checkpoints are read for their task, keypoint count and training
@@ -183,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nwrote {INDEX.name}: {args.id} {args.version}, {size / 1e6:.1f} MB")
     print(f"  sha256 {sha}")
     if args.framework != "ultralytics" or (task and task not in ("detect", "pose")):
-        print(f"\nnote: trackanno runs ultralytics detect and pose models. This one "
+        print("\nnote: trackanno runs ultralytics detect and pose models. This one "
               "is listed,\n  verified and downloadable there, and something else runs it.")
 
     if not task:
