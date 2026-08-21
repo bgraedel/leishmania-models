@@ -7,3 +7,7 @@
 
 __pycache__/
 *.py[cod]
+
+# Measurements and working notes. Numbers belong here, not in docstrings.
+.notes.md
+.notes/
