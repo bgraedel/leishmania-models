@@ -59,6 +59,54 @@ def from_checkpoint(path: Path) -> dict:
         return {}
 
 
+def _extra_config(given: str | None) -> dict:
+    """`--config`, as a JSON object. A leading brace is the object itself; anything
+    else is the file holding it, which is the shape a long one wants.
+
+    Every way of getting it wrong is answered with a sentence, the way the rest of this
+    script answers: a missing file and a stray unquoted key are the two likely mistakes
+    and neither is worth a traceback.
+    """
+    if not given:
+        return {}
+    if given.lstrip().startswith("{"):
+        text = given
+    else:
+        try:
+            text = Path(given).read_text(encoding="utf-8")
+        except OSError as unreadable:
+            raise SystemExit(f"--config {given}: {unreadable.strerror}. It takes the "
+                             f"JSON object itself (starting with {{) or a file holding "
+                             f"one.")
+    try:
+        extra = json.loads(text)
+    except json.JSONDecodeError as malformed:
+        raise SystemExit(f"--config is not valid JSON: {malformed}. Keys and strings "
+                         f"both need double quotes, and a shell that strips them wants "
+                         f"the object in a file instead.")
+    if not isinstance(extra, dict):
+        raise SystemExit(f"--config has to be a JSON object keyed by consumer, "
+                         f"got {type(extra).__name__}")
+    return extra
+
+
+def _check_tiling(tiling: dict) -> None:
+    """The same bounds the --tile and --overlap flags enforce.
+
+    `--config` reaches the same keys by another road, and an entry published with an
+    overlap of 0.95 is not caught here but by `tiling.settings` inside every run of it,
+    which is every user rather than the one publishing.
+    """
+    overlap = tiling.get("overlap")
+    if overlap is not None and not 0.0 <= overlap < 0.9:
+        raise SystemExit(f"config.tiling.overlap is a fraction of the tile, 0 to below "
+                         f"0.9; got {overlap}. Every run of the entry would refuse it.")
+    tile = tiling.get("tile")
+    if tile is not None and (not isinstance(tile, int) or tile < 0):
+        raise SystemExit(f"config.tiling.tile is a size in pixels, or 0 for one pass "
+                         f"over the whole frame; got {tile}.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -80,6 +128,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--framework", default="ultralytics",
                         help="what loads the file: ultralytics, cellpose, "
                              "hf-transformers, onnx, torchscript, ...")
+    parser.add_argument("--config", default=None,
+                        help="extra settings as JSON, merged into config: the object "
+                             'itself, or a path to a .json holding it. e.g. '
+                             '\'{"cellpose": {"niter": 600, "flow_threshold": 0.6}}\'. '
+                             "config is keyed by consumer and carried verbatim, so "
+                             "this is where a setting goes that has no flag of its own")
     parser.add_argument("--preprocess", type=Path, default=None,
                         help="json describing how pixels reach the model (input "
                              "size, normalisation, channels). Needed for anything "
@@ -136,6 +190,14 @@ def main(argv: list[str] | None = None) -> int:
     if nodes:
         edges = [[nodes[i], nodes[i + 1]] for i in range(len(nodes) - 1)] if args.chain else []
         config["keypoints"] = {"nodes": nodes, "edges": edges}
+    # Merged one key deep, so --config can add a cellpose setting without replacing
+    # the tiling a flag put there, and can still override one key of it.
+    for key, value in _extra_config(args.config).items():
+        if isinstance(value, dict) and isinstance(config.get(key), dict):
+            config[key].update(value)
+        else:
+            config[key] = value
+    _check_tiling(config.get("tiling") or {})
 
     # One value stays a scalar; several become a list, which is how a model
     # trained across magnifications says so. Anything reading this treats a
@@ -152,7 +214,11 @@ def main(argv: list[str] | None = None) -> int:
     preprocess = {}
     if args.preprocess:
         preprocess = json.loads(args.preprocess.read_text(encoding="utf-8"))
-    elif args.framework != "ultralytics":
+    elif args.framework != "ultralytics" and args.framework not in config:
+        # ... unless config already carries a block for that framework, which is the
+        # other place a consumer can be told how to run the thing. A cellpose 4 entry
+        # takes that route: the network has no fixed input size to record, and what
+        # normalisation it wants is one of the settings under config.cellpose.
         print(f"\nwarning: a {args.framework} model needs --preprocess, or whoever"
               "\n  runs it has to guess the input size and normalisation.")
 
