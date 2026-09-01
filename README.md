@@ -4,9 +4,8 @@ Trained weights for *Leishmania* imaging, published as release assets with an in
 that records how each model should be run.
 
 Any framework, any task: ultralytics, cellpose, HuggingFace transformers, ONNX,
-brightfield or fluorescence. Each entry names what loads it and carries its own
-inference settings, preprocessing and acquisition assumptions, so a model can be used
-correctly without anyone having to remember what it was trained on.
+brightfield or fluorescence. Each entry names what loads it and carries its inference
+settings, preprocessing and acquisition assumptions.
 
 ## Using them
 
@@ -44,8 +43,8 @@ first. See [examples/README.md](examples/README.md).
 | `publish.py` | builds an index entry from a checkpoint |
 | `examples/` | a script per model, taking its settings from the index |
 
-Weights are release assets, never git objects. A 200 MB checkpoint committed here would
-sit in every clone for ever. `.gitignore` stops that happening by accident.
+Weights are release assets, never git objects — a committed checkpoint would sit in
+every clone for ever, and `.gitignore` stops that happening by accident.
 
 ## Adding a model
 
@@ -73,10 +72,12 @@ python publish.py best_pose.pt --id leishmania-pose --version v1 \
     --imgsz 1280 --tile 640 --overlap 0.15 --fps 100 --pixel-size 0.325 \
     --nodes Head Base Flag1 Flag2 Flag3 Flag4 Flag5 Tip --chain
 
-# a cellpose model, trained across two magnifications
-python publish.py CP_20240101 --id leishmania-cyto --version v1 \
+# a cellpose model, trained across two magnifications, with the settings
+# examples/cellpose_seg.py will run it at
+python publish.py CP_20240101 --id leishmania-cellpose --version v1 \
     --framework cellpose --task segment --modality fluorescence \
-    --preprocess cellpose.json --pixel-size 0.2 0.65
+    --pixel-size 0.2 0.65 \
+    --config '{"cellpose": {"niter": 600, "flow_threshold": 0.6, "class": "animal"}}'
 
 # a Mask2Former checkpoint from HuggingFace, zipped
 python publish.py m2f.tar.gz --id leishmania-m2f --version v1 \
@@ -125,7 +126,15 @@ published.
 
 `config` and `preprocess` are carried verbatim and interpreted only by the consumer, so
 a cellpose entry can put `diameter` under `config.cellpose` and a trackanno entry
-`imgsz` under `config.detection`, neither knowing about the other.
+`imgsz` under `config.detection`, neither knowing about the other. `--config` writes
+any such key; flags cover only the ones every entry needs.
+
+`examples/cellpose_seg.py` reads `config.cellpose` for `diameter`, `niter`,
+`flow_threshold`, `cellprob_threshold`, `min_size`, `max_size_fraction`, `bsize`,
+`block_overlap`, `resample`, `augment`, `batch`, `normalize`, `percentile`,
+`tile_norm`, `sharpen` and `invert` — plus `class`, the name its one class gets, and
+`file`, which says which file to load out of an entry published as an archive. A
+command-line flag beats the entry, and the run prints which settings the entry supplied.
 
 `assumes` takes a number or a list. A model trained across magnifications says
 `"pixel_size_um": [0.2, 0.65]`, and a consumer checks whether the acquisition falls
@@ -142,5 +151,5 @@ GitHub caps a release asset at 2 GB. A YOLO pose model is 50–250 MB and a Swin
 Mask2Former around 800 MB. Releases do not count towards repository size.
 
 One release per model version, and a tag is never moved. A consumer pins the digest on
-first fetch, so weights that changed under an unchanged name are refused rather than
-silently substituted. Publish `v2` rather than re-uploading `v1`.
+first fetch and refuses weights that changed under an unchanged name — publish `v2`
+instead of re-uploading `v1`.

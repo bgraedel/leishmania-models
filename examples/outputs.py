@@ -1,19 +1,15 @@
 #!/usr/bin/env python
-"""What a model found, and what to do with it: colour it, stack it, hand it to ImageJ.
+"""Turn what a model found into an overlay, a label stack and ImageJ rois.
 
-Each script turns its own results into a list of `Found` per frame and leaves the
-rest here, so all four write the same files in the same layout and nothing in this
-module has to know which model produced them.
+Each script builds a list of `Found` per frame; everything else happens here.
 
-    --frames 0-99        run a range rather than one frame; every output grows a T axis
+    --frames 0-99        a range; every output grows a T axis
     --color instance     a hue per instance instead of a colour per class
-    --tiff labels.tif    an ImageJ hyperstack, one channel per class, pixel values the
+    --tiff labels.tif    ImageJ hyperstack, one channel per class, pixel value the
                          instance's number in that frame
-    --rois rois.zip      a RoiSet, one roi per instance, that ImageJ opens into the
-                         ROI manager
+    --rois rois.zip      a RoiSet, one roi per instance
 
-The stacks are memory-mapped and filled a frame at a time, so a long run costs disk
-rather than RAM.
+Stacks are memory-mapped and filled a frame at a time, so a long run costs disk not RAM.
 """
 
 from __future__ import annotations
@@ -27,21 +23,11 @@ import numpy as np
 
 
 class Found(NamedTuple):
-    """One thing a model found in one frame.
+    """One thing a model found in one frame: a mask, a box or a chain of points.
 
-    Each model fills in what it has: a mask from the segmenters, a box from the
-    detector, an ordered chain of points from the pose model.
-
-    A mask is stored as its own bounding box rather than a frame-sized array, with
-    `origin` saying where that box sits. A tiled 2048 px frame can hold a thousand
-    instances, and a thousand frame-sized bool arrays is four gigabytes for objects
-    that are a few hundred pixels each.
-
-    `cell` is which of the detector's cells this is part of, and is filled in only by a
-    `--guide` run, which is the only one that knows. It is what makes an animal, its
-    body and its flagellum three views of ONE thing rather than three unrelated
-    instances that happen to overlap: they carry the same number into every output, so
-    the three channels of a label stack can be read back together.
+    A mask is stored at its own bounding box, with `origin` saying where that box sits
+    in the frame. `cell` is the detector's cell number and is filled in only under
+    `--guide`, so an animal, its body and its flagellum share one number in every output.
     """
 
     label: str
@@ -65,8 +51,8 @@ class Found(NamedTuple):
 def at_bounds(mask: np.ndarray, origin: tuple[int, int] = (0, 0)):
     """A `Found`-ready (mask, origin) pair: the mask cut down to its own bounding box.
 
-    `origin` is where the given mask sits, so a tile's mask can be handed in with the
-    tile's own corner and comes back in frame coordinates.
+    `origin` is (y, x) of where the given mask sits, so a tile's mask handed in with the
+    tile's own corner comes back in frame coordinates.
     """
     rows = np.flatnonzero(mask.any(1))
     if not len(rows):
@@ -81,18 +67,13 @@ def clean_components(mask: np.ndarray, mode: str = "union", min_area: int = 60,
                      min_frac: float = 0.05) -> np.ndarray:
     """Drop spurious connected components from ONE instance's mask.
 
-    Mask2Former will happily predict a good blob and a few specks elsewhere in the
-    tile under a single instance id. The specks are not another cell and nothing
-    downstream will ever split them off, so they go here, before the instance is
-    placed in the frame.
-
       "all"      leave the mask as the model drew it
       "largest"  keep only the biggest 8-connected component
       "union"    drop components below max(min_area, min_frac x the instance) and keep
                  the union of the rest; where every component is tiny, keep the largest
 
-    Only components *within one instance* are touched. Two instances that happen to
-    touch are two instances; that question belongs to tiling.merge_masks.
+    Only components within one instance; splitting two touching instances belongs to
+    tiling.merge_masks.
     """
     if mode == "all":
         return mask
@@ -105,10 +86,10 @@ def clean_components(mask: np.ndarray, mode: str = "union", min_area: int = 60,
     else:
         floor = max(int(min_area), int(min_frac * int(areas.sum())))
         keep = np.flatnonzero(areas >= floor) + 1
-        if not len(keep):  # all of them are specks; the biggest speck is the instance
+        if not len(keep):  # all specks; the biggest one is the instance
             keep = np.array([int(np.argmax(areas)) + 1])
         elif len(keep) == count:
-            return mask  # nothing dropped, so the union IS the input
+            return mask  # nothing dropped
     lookup = np.zeros(count + 1, bool)
     lookup[keep] = True
     return lookup[labelled]
@@ -127,7 +108,7 @@ def _components(mask: np.ndarray):
     except ImportError:
         raise SystemExit(
             "cleaning up components needs scipy or OpenCV: pip install scipy, or pass"
-            " --components all to keep the masks as the model drew them")
+            " --components all")
     count, labelled = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
     return labelled, count - 1
 
@@ -136,9 +117,8 @@ def instance_mask(mask: np.ndarray, origin: tuple[int, int], mode: str = "union"
                   min_area: int = 60, min_frac: float = 0.05, drop_below: int = 25):
     """A raw mask out of a tile -> the (mask, origin) a `Found` wants, or None.
 
-    Cut to its bounding box first, which is also much the cheapest thing to label;
-    cleaned of stray components; cut again, because dropping a component at the edge
-    frees a row; and dropped altogether if what survives is too small to be a cell.
+    Cut to its bounding box, cleaned of stray components, cut again, and dropped
+    altogether if fewer than `drop_below` px survive.
     """
     placed = at_bounds(mask, origin)
     if placed is None:
@@ -156,11 +136,10 @@ def instance_mask(mask: np.ndarray, origin: tuple[int, int], mode: str = "union"
 
 
 def resolve_classes(names, override: str | None = None) -> list[str]:
-    """The model's class names in label-id order, with `--classes` able to replace them.
+    """The model's class names in label-id order; `--classes` replaces them by position.
 
-    A checkpoint whose id2label was never filled in comes back as LABEL_0, LABEL_1,
-    and those names then go on to title the channels of the label stack and every roi
-    in the RoiSet. `--classes body,flagellum` replaces them by position.
+    A checkpoint whose id2label was never filled in comes back as LABEL_0, LABEL_1, and
+    those names title the label stack's channels and every roi in the RoiSet.
     """
     ordered = [str(names[key]) for key in sorted(names)]
     if override:
@@ -187,11 +166,9 @@ UNNAMED = (255, 210, 0)
 def colour(index: int, label: str, by: str) -> tuple[int, int, int]:
     if by == "class":
         return CLASS_COLOURS.get(label, UNNAMED)
-    # A golden-angle walk round the hue circle: consecutive instances land far apart
-    # on it, so two cells that touch never come out the same colour, which is the
-    # whole point of colouring by instance. Under --guide the number is the detector's
-    # cell, so a body and its own flagellum come out the SAME hue and the pairing is
-    # visible. Nothing tracks between frames, so a hue still changes frame to frame.
+    # Golden-angle walk round the hue circle, so two touching cells differ. Under --guide
+    # `index` is the detector's cell, so a body and its flagellum share a hue. Nothing
+    # tracks between frames, so a hue still changes frame to frame.
     hue = (index * 0.6180339887498949) % 1.0
     red, green, blue = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
     return round(255 * red), round(255 * green), round(255 * blue)
@@ -210,8 +187,8 @@ def frame_count(path) -> int:
 def default_output(image, model: str) -> Path:
     """Where the overlay goes when --out is not given.
 
-    A folder has no suffix to replace, so its results are named after it and land
-    beside it rather than inside it, where a second run would pick them up as input.
+    A folder's results are named after it and land beside it, not inside it, where a
+    second run would read them as input.
     """
     image = Path(image)
     if image.is_dir():
@@ -220,12 +197,7 @@ def default_output(image, model: str) -> Path:
 
 
 def progress(items, desc: str, leave: bool = True):
-    """A bar over `items` where one is worth having, and `items` itself where not.
-
-    tqdm arrives with ultralytics and with transformers, so every script that could
-    want this already has it; it is declared as a dependency anyway rather than
-    relied on second-hand, and its absence falls back to no bar rather than failing.
-    """
+    """A tqdm bar over `items`, or `items` itself for one item or no tqdm."""
     items = list(items)
     if len(items) < 2:
         return items
@@ -233,9 +205,7 @@ def progress(items, desc: str, leave: bool = True):
         from tqdm import tqdm
     except ImportError:
         return items
-    # disable=None is tqdm's "only when attached to a terminal". Piped into a file or
-    # a log, a bar is redrawn on every update and the record fills with carriage
-    # returns, so there it prints nothing and the per-frame lines carry the progress.
+    # disable=None: tqdm draws only when attached to a terminal, so a log stays clean.
     return tqdm(items, desc=desc, leave=leave, unit="", dynamic_ncols=True,
                 disable=None)
 
@@ -252,9 +222,8 @@ def say(text: str) -> None:
 def parse_frames(spec: str, available: int) -> list[int]:
     """`0`, `10-19`, `10-`, `0-99:5` or `all` -> the frame numbers to run.
 
-    An open end (`10-`) runs to the last frame. A range running off the end is cut
-    to what the input holds and says so, rather than quietly returning fewer frames
-    than were asked for.
+    An open end (`10-`) runs to the last frame. A range running off the end is cut to
+    what the input holds and says so.
     """
     spec = str(spec).strip()
     asked = None
@@ -285,8 +254,7 @@ def parse_frames(spec: str, available: int) -> list[int]:
 def segments(item: Found):
     """A chain's edges, minus any whose endpoint the model did not see.
 
-    The pairs come from the model's own entry in the index. Consecutive nodes are only
-    the default, which happens to be right for a flagellum.
+    The pairs come from the model's index entry; consecutive nodes are only the default.
     """
     pairs = item.edges or [(i, i + 1) for i in range(len(item.line) - 1)]
     for start, end in pairs:
@@ -322,8 +290,7 @@ def draw(frame: np.ndarray, found: list[Found], by: str = "class",
             for position, (x, y) in enumerate(item.line):
                 if np.isnan(x):
                     continue
-                # The first node is picked out whatever the rest is coloured, so which
-                # end of a chain is the head stays readable.
+                # The first node is always red, so the head of a chain stays readable.
                 pen.ellipse([x - 2, y - 2, x + 2, y + 2],
                             fill=(255, 60, 60) if position == 0 else rgb)
     return np.asarray(canvas)
@@ -335,16 +302,11 @@ def draw(frame: np.ndarray, found: list[Found], by: str = "class",
 def numbers_for(found: list[Found]) -> list:
     """The number each instance goes into the outputs under.
 
-    The detector's cell where a `--guide` run established one, so an animal, its body
-    and its flagellum all carry the same number in their own channels and whoever reads
-    the stack can put the three back together. Without a guide there is no such
-    relation to record and the number is the position in the list.
-
-    A number is taken by at most one instance of a class. The roi's name and the label
-    plane's pixel value are both built from it, so two instances of one class sharing a
-    number is one outline silently replacing the other. A cell the segmenter found two
-    of the same class in -- and anything the detector did not propose at all -- is
-    numbered after the last cell instead.
+    The detector's cell under `--guide`, so an animal, its body and its flagellum carry
+    the same number in their own channels; otherwise the position in the list. One number
+    per class per frame, since the roi name and the label pixel are built from it: a
+    second instance of a class in one cell, and anything the detector did not propose, is
+    numbered after the last cell.
     """
     cells = [item.cell for item in found if item.cell]
     if not cells:
@@ -374,8 +336,8 @@ def _memmap(path, shape, dtype, axes, labels=None):
 def _chain_patch(item: Found, shape: tuple[int, int]):
     """A chain drawn as a one-pixel line, as (bool patch, its (y, x) corner).
 
-    Drawn into its own bounding box rather than straight onto the plane, so what it
-    would claim can be compared with what is already there before anything is written.
+    Drawn into its own bounding box, so what it would claim can be checked against the
+    plane before anything is written.
     """
     cv2 = opencv()
     lines = list(segments(item))
@@ -390,8 +352,8 @@ def _chain_patch(item: Found, shape: tuple[int, int]):
         return None
     patch = np.zeros((y1 - y0, x1 - x0), np.uint8)
     for first, last in lines:
-        # plain ints: older OpenCV refuses a numpy scalar in a point. A node outside
-        # the patch is clipped by cv2, which is what it did on the plane before.
+        # plain ints: older OpenCV refuses a numpy scalar in a point. cv2 clips a node
+        # that falls outside the patch.
         cv2.line(patch, (int(round(first[0])) - x0, int(round(first[1])) - y0),
                  (int(round(last[0])) - x0, int(round(last[1])) - y0), 1, 1)
     return patch.astype(bool), (y0, x0)
@@ -400,25 +362,14 @@ def _chain_patch(item: Found, shape: tuple[int, int]):
 class LabelStack:
     """Label images, one channel per class, one time point per frame.
 
-    Pixel values are the instance's number within its frame, so a channel is a label
-    image rather than a binary mask and Analyze Particles or any label reader takes it
-    unchanged. A box is filled in and a chain is drawn as a one-pixel line, so the
-    detector and the pose model land in the same file format as the segmenters.
+    A pixel's value is the instance's number within its frame, so any label reader takes
+    a channel unchanged. Boxes are filled and chains drawn as one-pixel lines. Numbers
+    run across the whole frame, so a channel skips values and the value matches the roi's
+    name; under `--guide` it is the detector's cell number. See `numbers_for`.
 
-    The number runs across the whole frame rather than restarting per channel, so a
-    channel skips values -- and the value in the stack is the one in the roi's name,
-    which is what makes the two files line up. Under `--guide` it is the DETECTOR's
-    cell number, so a body in channel 2 and a flagellum in channel 3 sharing the value
-    7 are the body and the flagellum of one cell. See `numbers_for`.
-
-    One plane holds one number per pixel, so two instances of the same class that
-    overlap cannot both have it. They are painted best-scoring first and a pixel is
-    claimed only once, so the better instance keeps its shape whole and the other is
-    the one that loses pixels; what that cost was is said at the end rather than left
-    to be found later in the measurements. A detector's boxes are filled and overlap
-    constantly, and an amodal model draws its cells through each other on purpose, so
-    both will always pay it: `--rois` is where every instance keeps its own outline
-    and nothing is contested.
+    One plane holds one number per pixel, so overlapping instances of one class are
+    painted best-scoring first and the contested pixels reported at the end. `--rois`
+    keeps every outline whole.
     """
 
     def __init__(self, path, classes: list[str], shape: tuple[int, int], frames: int):
@@ -431,9 +382,8 @@ class LabelStack:
                              "TCYX", labels=self.classes * frames)
 
     def add(self, position: int, found: list[Found]) -> None:
-        # Best-scoring first, whatever order the list arrived in. The instance numbers
-        # have to stay the ones the rois and the overlay use, so it is the painting
-        # that is reordered here and not the list.
+        # Painting is reordered, not the list: the numbers stay the ones the rois and
+        # the overlay use.
         given = numbers_for(found)
         for order in sorted(range(len(found)), key=lambda i: -found[i].score):
             item = found[order]
@@ -456,8 +406,7 @@ class LabelStack:
             return plane[y0:y1, x0:x1], item.mask
         if item.box is not None:
             x0, y0, x1, y1 = (int(round(value)) for value in item.box)
-            # Both ends clamped: a negative far edge becomes a negative slice bound,
-            # which is not an empty window but very nearly the whole plane.
+            # Both ends clamped: a negative far edge would slice nearly the whole plane.
             window = plane[max(y0, 0):max(y1 + 1, 0), max(x0, 0):max(x1 + 1, 0)]
             return (window, np.ones(window.shape, bool)) if window.size else None
         if item.line is not None:
@@ -477,8 +426,7 @@ class LabelStack:
         say(f"  {self.contested} px went to whichever instance scored higher"
             + (f", and {self.buried} instance(s) kept none of their own" if self.buried
                else "")
-            + ": one plane holds one number per pixel, so same-class instances that "
-              "overlap cannot both have it. --rois keeps every outline whole.")
+            + ": one plane holds one number per pixel. --rois keeps every outline whole.")
 
 
 # ImageJ rois
@@ -495,8 +443,8 @@ def opencv():
 def _outline(item: Found) -> np.ndarray | None:
     """The largest outline of an instance's mask, as (n, 2) x-y points in the frame.
 
-    The largest only. A mask that comes back in two pieces would need two rois and a
-    naming scheme to say they belong together, which is not this file's decision.
+    The largest contour only: a mask in two pieces would need two rois and a naming
+    scheme to pair them.
     """
     cv2 = opencv()
     contours, _ = cv2.findContours(item.mask.astype(np.uint8), cv2.RETR_EXTERNAL,
@@ -513,15 +461,9 @@ def _outline(item: Found) -> np.ndarray | None:
 def _polyline(item: Found):
     """The longest unbroken run of a chain, as (n, 2) x-y points, or None.
 
-    A polyline is ONE ordered path, so a chain the model saw in pieces cannot become a
-    single roi without inventing the joins that are missing. The longest run only, for
-    the same reason `_outline` keeps the largest contour: two rois would need a naming
-    scheme saying they belong together, and that is not this file's decision.
-
-    Built from `segments`, so it honours the model's own skeleton and skips an edge
-    whose endpoint was not seen -- which the label stack and the overlay already do.
-    Reading the nodes in array order instead drew a line straight across the gap, and
-    for a skeleton that is not consecutive it drew the wrong shape entirely.
+    A polyline is one ordered path, so a chain seen in pieces cannot be a single roi.
+    Built from `segments`, so it follows the model's skeleton and skips edges with an
+    unseen endpoint; reading the nodes in array order would draw across the gaps.
     """
     runs, run = [], []
     for first, last in segments(item):
@@ -538,16 +480,12 @@ def _polyline(item: Found):
 
 def rois(found: list[Found], position: int, number: int | None = None,
          by: str = "class") -> list:
-    """One roi per instance, named <frame>-<class>-<instance>.
+    """One roi per instance, named <frame>-<class>-<n>.
 
-    `position` is the slice within THIS run's output, and it is what the roi is
-    pinned to, because that stack is what the RoiSet gets opened over. `number` is
-    the frame it came from and goes in the name only: `--frames 10-19` writes ten
-    slices and its rois belong to slices 0-9 of them, however the input numbered them.
-
-    The class is carried in the name and the outline colour rather than in the roi's
-    channel: a RoiSet pinned to channel 2 disappears when it is opened over the
-    original single-channel movie, which is where most of these end up.
+    `position` is the slice within THIS run's output and is what the roi is pinned to;
+    `number` is the frame it came from and goes in the name only, so `--frames 10-19`
+    writes ten slices whose rois sit on slices 0-9. The class is carried in the name and
+    the outline colour, so the set still shows over a single-channel movie.
     """
     import roifile
 
@@ -561,8 +499,7 @@ def rois(found: list[Found], position: int, number: int | None = None,
             points, kind = _polyline(item), roifile.ROI_TYPE.POLYLINE
         elif item.box is not None:
             x1, y1, x2, y2 = item.box
-            # Four corners rather than ROI_TYPE.RECT: it draws the same, and one code
-            # path means a box can never disagree with its own bounding box.
+            # Four corners rather than ROI_TYPE.RECT: draws the same, one code path.
             points = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
             kind = roifile.ROI_TYPE.POLYGON
         else:
@@ -598,47 +535,78 @@ def _stack_path(out: Path, frames: int) -> Path:
 # What the scripts call
 
 
+# Each optional output: its flag, its suffix when a whole set goes into one folder, and
+# its name. gui.py reads this, so an output added here also appears in the window.
+OUTPUT_SET = (("out", ".png", "overlay"),
+              ("tiff", "-labels.tif", "label stack"),
+              ("rois", "-rois.zip", "ImageJ rois"))
+
+
 def add_output_arguments(parser) -> None:
-    """The flags every script shares, so none of them can drift from the others."""
-    parser.add_argument("--frames", default="0",
-                        help="which frames: 0, 10-19, 0-99:5, or all")
-    parser.add_argument("--color", "--colour", choices=("class", "instance"),
-                        default="class",
-                        help="a colour per class, or a hue per instance")
-    parser.add_argument("--out", type=Path, default=None,
-                        help="the overlay: a .png for one frame, an ImageJ RGB stack "
-                             "for a range")
-    parser.add_argument("--tiff", type=Path, default=None,
-                        help="label images as an ImageJ hyperstack, one channel per class")
-    parser.add_argument("--rois", type=Path, default=None,
-                        help="a RoiSet .zip, one roi per instance, named "
-                             "<frame>-<class>-<n>")
-    parser.add_argument("--classes", default=None,
-                        help="rename the model's classes, in label-id order, e.g. "
-                             "body,flagellum. For a checkpoint whose id2label was "
-                             "never filled in")
+    """The output flags every script shares.
+
+    A named group, which titles a `--help` section and is what gui.py lays its form out
+    by, so a flag added here appears in both.
+    """
+    group = parser.add_argument_group("outputs")
+    group.add_argument("--frames", default="0",
+                       help="which frames: 0, 10-19, 0-99:5, or all")
+    group.add_argument("--color", "--colour", choices=("class", "instance"),
+                       default="class",
+                       help="a colour per class, or a hue per instance")
+    group.add_argument("--out", type=Path, default=None,
+                       help="the overlay: a .png for one frame, an ImageJ RGB stack "
+                            "for a range")
+    group.add_argument("--tiff", type=Path, default=None,
+                       help="label images as an ImageJ hyperstack, one channel per class")
+    group.add_argument("--rois", type=Path, default=None,
+                       help="a RoiSet .zip, one roi per instance, named "
+                            "<frame>-<class>-<n>")
+    group.add_argument("--classes", default=None,
+                       help="rename the model's classes, in label-id order, e.g. "
+                            "body,flagellum")
+
+
+def writers_for(args, image, model: str, classes, numbers: list) -> "Writers":
+    """The three outputs, set up the way every script sets them up.
+
+    Without `--out` the overlay is named after the model. Stack lengths come from the
+    frame headers `frame_sizes` has already read, so each file is made the right length
+    before any model loads.
+    """
+    from fetch import frame_sizes
+
+    sizes = frame_sizes(image)
+    return Writers(len(numbers), classes, args.color,
+                   args.out or default_output(image, model), args.tiff, args.rois,
+                   [sizes[number] for number in numbers])
+
+
+def cleanup_from(args) -> tuple:
+    """The mask cleanup `instance_mask` takes, in the order it takes it."""
+    return (args.components, args.min_component_area, args.min_component_frac,
+            args.min_area)
 
 
 def add_mask_arguments(parser) -> None:
-    """The per-instance mask cleanup, shared by the two scripts that produce masks."""
-    parser.add_argument("--components", choices=("union", "largest", "all"),
-                        default="union",
-                        help="stray connected components inside one instance mask: "
-                             "drop the small ones, keep only the largest, or keep all")
-    parser.add_argument("--min-component-area", type=int, default=60,
-                        help="union: a component below this many px is a speck")
-    parser.add_argument("--min-component-frac", type=float, default=0.05,
-                        help="union: ... and so is one below this fraction of the instance")
-    parser.add_argument("--min-area", type=int, default=25,
-                        help="drop an instance smaller than this many px altogether")
+    """The per-instance mask cleanup, shared by the scripts that produce masks."""
+    group = parser.add_argument_group("mask cleanup")
+    group.add_argument("--components", choices=("union", "largest", "all"),
+                       default="union",
+                       help="stray connected components inside one instance mask: "
+                            "drop the small ones, keep only the largest, or keep all")
+    group.add_argument("--min-component-area", type=int, default=60,
+                       help="union: a component below this many px is a speck")
+    group.add_argument("--min-component-frac", type=float, default=0.05,
+                       help="union: ... and so is one below this fraction of the instance")
+    group.add_argument("--min-area", type=int, default=25,
+                       help="drop an instance smaller than this many px altogether")
 
 
 def report(number: int, found: list[Found], total: int, dropped: int = 0) -> None:
     """One line per frame over a range, the whole list for a single frame.
 
-    `dropped` is what `--guide-strict` discarded. Counted out loud rather than left
-    out: the whole point of the flag is that the detector decides what is in the
-    frame, and how much the segmenter disagreed is the thing worth watching.
+    `dropped` is what `--guide-strict` discarded.
     """
     from collections import Counter
 
@@ -675,14 +643,10 @@ def report(number: int, found: list[Found], total: int, dropped: int = 0) -> Non
 class Writers:
     """The three optional outputs, opened as they are first needed and closed at the end.
 
-    One stack cannot hold two frame sizes, but nothing about running the model needs
-    them to agree -- so frames of different sizes are still run in one pass, in order,
-    and it is only the FILES that are split: one set of outputs per size, named after
-    it. A folder of one size, which is the ordinary case, has a single group and keeps
-    exactly the names that were asked for.
-
-    `sizes` is the size of every frame this run will reach, in order, so each stack can
-    be made the right length before the first frame arrives.
+    One stack cannot hold two frame sizes, so frames of different sizes run in one pass
+    but the FILES are split: one set per size, named after it. A folder of one size keeps
+    exactly the names asked for. `sizes` is the size of every frame this run will reach,
+    in order, so each stack is made the right length up front.
     """
 
     def __init__(self, frames: int, classes, by: str = "class",
@@ -703,15 +667,15 @@ class Writers:
         self.open: dict = {}
 
     def _named(self, base: Path, size) -> Path:
-        """The file a group writes to: the name asked for, plus its size where there
-        is more than one group to tell apart."""
+        """The file a group writes to: the name asked for, plus its size where there is
+        more than one group."""
         if not self.split:
             return base
         return base.with_name(f"{base.stem}-{size[1]}x{size[0]}{base.suffix}")
 
     def _overlay_named(self, size, frames: int) -> Path:
-        """...and the overlay alone has to become a stack once there are several
-        frames of that size, whatever suffix was asked for."""
+        """...and the overlay becomes a stack once a size has several frames, whatever
+        suffix was asked for."""
         return _stack_path(self._named(self.overlay_path, size), frames)
 
     def add(self, position: int, number: int, frame: np.ndarray,
@@ -721,7 +685,7 @@ class Writers:
         if size is not None and size != shape:
             raise SystemExit(
                 f"frame {number} is {shape[1]}x{shape[0]}, but its header said "
-                f"{size[1]}x{size[0]}, so the stack made for it is the wrong shape.")
+                f"{size[1]}x{size[0]}: the stack made for it is the wrong shape.")
         frames = self.length[size]
         group = self.open.setdefault(size, {"overlay": None, "labels": None,
                                             "rois": [], "frames": frames})

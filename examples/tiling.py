@@ -1,24 +1,10 @@
 #!/usr/bin/env python
 """Running a model over a frame in tiles, and putting the pieces back together.
 
-**Nothing here happens by default.** Every script runs one plain pass: the whole frame
-into the model at the input size the index records for it. Tiling is opt-in, because
-it is a real change to what the model is shown and to what comes out, and both should
-be asked for rather than arrived at.
-
-What asking for it buys is scale. A model handed a frame larger than its input fits
-that frame's long side to it, so every cell reaches the model shrunk by the same
-factor, and the smallest go with it. Cutting the frame into tiles the size of that
-input and running each puts every cell back at 1.0x. The cost is that an object
-straddling a tile edge is found twice, or in halves, so the pieces have to be rejoined
-afterwards -- which is the rest of this file, and none of it is free.
-
-`--tile N` turns it on; the run says what N the index records for the model. `--guide`
-places those tiles on the cells a detector found instead of gridding them, which is
-the version of this with nothing to rejoin. **Overlap is a fraction of the tile**, and
-on a grid it has to be wider than the longest object: a cell longer than the overlap
-is never whole in any tile, and no amount of merging afterwards invents the part that
-was never seen.
+Tiling is opt-in: by default a script runs one pass over the whole frame. `--tile N`
+turns it on and puts cells at 1.0x. Overlap is a fraction of the tile and on a grid
+must exceed the longest object, or no tile ever sees that object whole. `--guide`
+places the tiles on the cells a detector found instead of gridding them.
 """
 
 from __future__ import annotations
@@ -27,34 +13,28 @@ import numpy as np
 
 from outputs import Found, say
 
-# Where an entry records no overlap. A quarter of a tile is comfortably longer than a
-# promastigote with its flagellum at the magnifications these models are for.
+# Used where an entry records no overlap.
 DEFAULT_OVERLAP = 0.25
 
-# Where `--stitch merge` has to decide whether two boxes from neighbouring tiles are
-# one cell. Only the box merger has any use for it; see `stitch`.
+# Only the box merger uses this; see `stitch`.
 DEFAULT_IOU = 0.5
 
-# How many times `cover` alternates dropping redundant tiles and recentring what is
-# left. It settles in one or two; the cap is only so a pathological plan cannot spin.
+# Cap on `cover`'s drop/recentre passes, so a pathological plan cannot spin.
 _SETTLE = 4
 
 
 def settings(entry: dict, tile: int | None, overlap: float | None) -> tuple[int, float]:
     """The tile size and overlap to use: the number given, else what the index says.
 
-    0 is the whole frame in one pass and comes back as 0, which is what every script
-    defaults to: a model is shown the frame as it is unless tiling is asked for. None
-    is what asks for the index's own recorded tile, and is reached by `--guide`, tiling
-    being the whole point of that one.
+    tile 0 means one pass over the whole frame; tile None asks for the index's
+    recorded tile. Overlap is a fraction of the tile.
     """
     recorded = (entry.get("config") or {}).get("tiling") or {}
     asked = tile is not None, overlap is not None
     if tile is None:
         tile = recorded.get("tile") or 0
     if overlap is None:
-        # `is None`, not falsy: an entry recording no overlap at all wants the default,
-        # and one recording zero wants zero.
+        # `is None`, not falsy: a recorded 0 means zero, a missing one means the default.
         overlap = recorded.get("overlap")
         overlap = DEFAULT_OVERLAP if overlap is None else overlap
     where = "--tile" if asked[0] else "the tile the index records for this model"
@@ -71,9 +51,8 @@ def settings(entry: dict, tile: int | None, overlap: float | None) -> tuple[int,
 def slices(height: int, width: int, tile: int, overlap: float = 0.0):
     """Tile boxes (y0, x0, y1, x1) covering the frame.
 
-    The last row and column are snapped back to the edge rather than allowed to run
-    off it, so every tile is a full `tile` square wherever the frame is big enough,
-    and the last one overlaps its neighbour a little more than the rest.
+    `overlap` is a fraction of the tile. The last row and column snap back to the
+    frame edge, so they overlap their neighbour more than the rest.
     """
     if not tile or (height <= tile and width <= tile):
         return [(0, 0, height, width)]
@@ -103,30 +82,15 @@ def describe(shape, boxes, tile: int, overlap: float) -> str:
 
 
 def cover(boxes: list, shape, tile: int, pad: int = 0) -> tuple[list, list]:
-    """Tiles holding every box whole, and as few of them as they can be.
+    """Tiles (y0, x0, y1, x1) holding every box (x0, y0, x1, y1) whole, and as few as
+    possible.
 
-    A grid is laid down without knowing where anything is, so it cuts through cells
-    and everything after it is repair. Given the boxes a detector found, the tiles can
-    instead be put where the cells are: each one inside a tile in one piece, and the
-    only thing left to notice afterwards is that two tiles saw the same cell.
+    Interval stabbing per axis -- rows first, then each row's columns -- so the result
+    is optimal along each axis, not over the plane. `pad` asks for that much clear
+    space around each cell, given up where there is no room. Boxes are expected to lie
+    inside the frame.
 
-    A tile at origin `o` holds a box whole exactly when `far - tile <= o <= near`, so
-    each box is a RANGE of origins on each axis and the question is the fewest points
-    that fall inside every range. That is interval stabbing, which is solved exactly in
-    one dimension -- so it is done twice: once down the frame to fix the rows, then
-    once across each row. The result is optimal along each axis rather than over the
-    plane, the latter being NP-hard.
-
-    `pad` asks for that much clear space around every cell as well, so a cell sits
-    inside its tile rather than against the edge of it. It is given up where the frame
-    edge leaves nowhere to put it, since a cell there is at a real border and not a
-    seam, and where one tile serves cells too far apart to pad all of them.
-
-    Boxes are expected to lie inside the frame, which is what a detector run over the
-    frame produces. One reaching past an edge is only held where the frame is longer
-    than a tile on that axis.
-
-    -> (tiles, the boxes longer than one tile, which no tile can ever hold whole)
+    -> (tiles, boxes longer than one tile, which no tile can hold whole)
     """
     height, width = shape[:2]
     if not tile:
@@ -142,8 +106,7 @@ def cover(boxes: list, shape, tile: int, pad: int = 0) -> tuple[list, list]:
         else:
             fitted.append((down, across, box))
 
-    # The rows first, then each row's own columns. A box that several rows could hold
-    # goes to the first of them, so later rows stay as empty as they can be.
+    # A box several rows could hold goes to the first, so later rows stay emptier.
     rows = _stab([down for down, _, _ in fitted])
     mine: dict = {y: [] for y in rows}
     for down, across, _ in fitted:
@@ -154,18 +117,14 @@ def cover(boxes: list, shape, tile: int, pad: int = 0) -> tuple[list, list]:
     tiles = [_tile_at(y, x, shape, tile) for y in rows for x in _stab(mine[y])]
 
     held = [box for _, _, box in fitted]
-    # Recentring moves tiles, and moving them changes which boxes each holds: two that
-    # were distinct before the move can end up holding the same set, and a tile dropped
-    # for that reason hands its boxes to one that was centred without them. Both passes
-    # are cheap, so they run until neither changes anything, ending on a recentre so no
-    # tile is left centred on boxes it no longer has.
+    # Recentring changes which boxes each tile holds, so drop and recentre alternate
+    # until neither changes anything, ending on a recentre.
     for _ in range(_SETTLE):
         settled = _recentre(_drop_redundant(tiles, held), held, shape, tile, pad)
         if settled == tiles:
             break
         tiles = settled
-    # A cell longer than the tile fits in none of them. It still has to be looked at,
-    # so it gets a tile of its own with as much of it inside as there is room for.
+    # A cell longer than the tile gets a tile of its own, centred on it.
     tiles += [_tile_at(*_middle_of(box, shape, tile), shape, tile) for box in oversize]
     return list(dict.fromkeys(tiles)), oversize
 
@@ -173,13 +132,8 @@ def cover(boxes: list, shape, tile: int, pad: int = 0) -> tuple[list, list]:
 def assign(tiles: list, boxes: list) -> list:
     """Each box paired with the tile that owns it: the first one holding it whole.
 
-    The plan's own answer to "which tile is this cell's". Made once, from the boxes, so
-    that `stitch_by_plan` can settle every copy of a cell by the CELL rather than by
-    the copy -- a copy's own geometry moves when a tile cuts it and its centroid moves
-    with it, and a box does not move at all.
-
-    A box no tile holds whole is an oversize one; it goes to whichever tile has most of
-    it, which is the tile `cover` centred on it.
+    Made once from the boxes, so `stitch_by_plan` settles every copy of a cell by the
+    cell rather than by the copy. An oversize box goes to the tile holding most of it.
     """
     owners = []
     for box in boxes:
@@ -200,11 +154,9 @@ def _box_overlap(tile, box) -> float:
 
 
 def _stab(spans: list) -> list:
-    """The fewest points putting one inside every (lo, hi). Optimal, which is the
-    whole reason `cover` works an axis at a time rather than on the plane.
+    """The fewest points putting one inside every (lo, hi). Optimal.
 
-    Take the range that ends soonest and put a point at its end: no point further on
-    could reach it, and none further back reaches as much of what follows.
+    Interval stabbing: take the range ending soonest, put a point at its end, repeat.
     """
     points: list = []
     for lo, hi in sorted(spans, key=lambda span: span[1]):
@@ -237,12 +189,10 @@ def _holds(tile, box) -> bool:
 
 
 def _drop_redundant(tiles: list, boxes: list) -> list:
-    """Tiles not one of whose boxes needs them.
+    """Drop tiles whose every box some other tile already holds whole.
 
-    Rows and columns are each minimal on their own axis, which does not make the
-    rectangle they produce minimal: a tile can end up holding only cells that some
-    other tile already holds whole. Tried least-useful first, so dropping one cannot
-    make a more useful one look redundant afterwards.
+    Per-axis minimality does not make the rectangle minimal. Tried least-useful first,
+    so dropping one cannot make a more useful one look redundant.
     """
     tiles = list(dict.fromkeys(tiles))
     held = [{i for i, box in enumerate(boxes) if _holds(tile, box)} for tile in tiles]
@@ -257,10 +207,8 @@ def _drop_redundant(tiles: list, boxes: list) -> list:
 def _recentre(tiles: list, boxes: list, shape, tile: int, pad: int = 0) -> list:
     """Move each tile to the middle of the room its own boxes leave it.
 
-    Stabbing puts a tile's edge exactly on some box's edge, which is the worst place
-    for it: a cell lying against a tile edge is what a model reads as a cut one. Every
-    origin between a tile's tightest boxes holds the same set of them, so the middle of
-    that range is margin on both sides for nothing. Tiles left holding nothing go.
+    Stabbing lands a tile edge exactly on a box edge, which a model reads as a cut
+    cell. Every origin in the range holds the same boxes. Tiles holding nothing go.
     """
     height, width = shape[:2]
     mine: dict = {}
@@ -281,14 +229,9 @@ def _recentre(tiles: list, boxes: list, shape, tile: int, pad: int = 0) -> list:
 def _padded(boxes: list, near: int, far: int, total: int, tile: int, pad: int) -> tuple:
     """The origins holding every box with `pad` clear of it, else merely holding them.
 
-    Asked of each box separately and intersected, rather than of the one box that
-    spans them all: `pad` is clear space around a CELL, and the room around the hull of
-    several is not the room around any of them.
-
-    Where the boxes lie too far apart for one tile to give all of them the full `pad`,
-    they get the widest margin it can give all of them rather than none -- the ranges
-    only tighten as the margin grows, so that is a bisection, and a margin of nothing
-    always works because the tile holds every one of these boxes already.
+    `pad` is clear space around each box, so the ranges are intersected per box, not
+    taken around their hull. Where the full `pad` is impossible, the widest margin
+    that works for all of them is found by bisection.
     """
     def reach(want):
         spans = [_origins(box[near], box[far], total, tile, want) for box in boxes]
@@ -319,8 +262,7 @@ def describe_cover(shape, tiles: list, boxes: list, oversize: list, tile: int,
     height, width = shape[:2]
     grid = len(slices(height, width, tile, overlap))
     whole = sum(1 for box in boxes if any(_holds(t, box) for t in tiles))
-    # "cells" is what the DETECTOR found, not what is there. Said that way round
-    # because a guided run can only place tiles on what it was shown.
+    # "detected cells" is what the detector found, not what is there.
     line = (f"{width}x{height}: {len(tiles)} guided tiles of {tile} px for "
             f"{len(boxes)} detected cells, {whole} of them whole "
             f"({grid} on the grid at overlap {overlap:.0%})")
@@ -355,16 +297,8 @@ def _within(item: Found, band) -> tuple:
 def _agree_in_band(a: Found, b: Found, band, agreement: float) -> bool:
     """Whether two masks from neighbouring tiles are two views of one object.
 
-    Judged only inside the strip the two tiles share, because that strip is the one
-    ground both models actually looked at. Two copies of one object agree there almost
-    exactly, however differently the rest of it was cut off: whether one tile saw the
-    object whole or neither did, both saw all of it that lies in the strip.
-
-    The agreement is symmetric -- shared pixels over what either of them has in the
-    strip. Asking instead what fraction of the SMALLER one is shared says yes to any
-    object barely reaching into the strip across something else, since almost all of
-    the little it has there is then shared. Comparing the whole masks is weaker still:
-    most of each lies outside the strip, where the other tile saw nothing at all.
+    Judged only inside the strip the two tiles share, the one ground both models saw.
+    `agreement` is symmetric: shared pixels over what either has in the strip.
     """
     mine, at_mine = _within(a, band)
     theirs, at_theirs = _within(b, band)
@@ -395,18 +329,16 @@ def _union(items: list[Found]) -> Found:
         iy0, ix0, iy1, ix1 = item.bounds
         mask[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0] |= item.mask
     best = max(items, key=lambda item: item.score)
-    # The box came from one member and describes that member alone, so it would
-    # disagree with the mask now under it. `_extent` falls back to the mask's own
-    # bounds, which is the one thing here that is true of the union.
+    # box=None: one member's box would disagree with the union mask, and `_extent`
+    # then falls back to the mask's own bounds.
     return best._replace(mask=mask, origin=(y0, x0), box=None)
 
 
 def touches_seam(extent, tile, shape, margin: int = 2) -> bool:
     """Whether something runs into a tile edge that is not also the frame edge.
 
-    This is what tells a cut object from a whole one. A detection that stops short of
-    every tile edge is all the model had to say about it; one that runs into a seam
-    was interrupted there, and its other half is in the neighbouring tile.
+    How a cut object is told from a whole one. `extent` is (x0, y0, x1, y1); `tile`
+    is (y0, x0, y1, x1).
     """
     x0, y0, x1, y1 = extent
     ty0, tx0, ty1, tx1 = tile
@@ -418,8 +350,7 @@ def touches_seam(extent, tile, shape, margin: int = 2) -> bool:
 
 
 def _extent(item: Found):
-    """(x0, y0, x1, y1) around whatever geometry an instance has, or None if it has
-    none: a chain no node of which the model saw encloses nothing."""
+    """(x0, y0, x1, y1) around an instance's geometry, or None where it has none."""
     if item.box is not None:
         return item.box
     if item.mask is not None:
@@ -432,25 +363,14 @@ def _extent(item: Found):
             float(seen[:, 0].max()), float(seen[:, 1].max()))
 
 
-def merge_masks(found: list[Found], tiles: list, shape,
+def merge_masks(found: list[Found], tiles: list,
                 agreement: float = 0.5) -> list[Found]:
     """Union same-class masks from different tiles that are really one object.
 
-    Both cases this has to catch -- the same cell seen whole in one tile and truncated
-    in another, and a cell longer than the overlap that no tile holds whole -- come
-    down to one question: do the two masks agree about the strip their tiles share?
-    That strip is the only ground both models looked at, so it is the only place their
-    answers can be compared. `agreement` is how much of what either of them has there
-    the two of them share. See `_agree_in_band`.
-
-    Judging on the whole masks instead is a bare count of shared pixels against the
-    smaller area, and that is what chains a crowded frame into one blob: a stray
-    fragment scores a perfect containment against whatever it lies on, and the joins
-    are transitive.
-
-    Only instances from DIFFERENT tiles are ever compared, so two cells lying against
-    each other inside one tile stay two -- which is what keeps the amodal model's
-    masks, drawn through each other on purpose, from being fused.
+    Two masks are one object if they agree about the strip their tiles share; see
+    `_agree_in_band`. Joins are transitive, so a loose rule fuses a crowded frame into
+    one blob. Only instances from different tiles are compared, so cells lying against
+    each other inside one tile stay two.
     """
     masked = [item for item in found if item.mask is not None]
     rest = [item for item in found if item.mask is None]
@@ -489,23 +409,11 @@ def merge_boxes(found: list[Found], tiles: list, shape, iou: float = DEFAULT_IOU
                 containment: float = 0.7) -> list[Found]:
     """Per-class NMS across tiles, for a detector that has boxes and no masks.
 
-    A box has no shape to union, so one copy of each cell wins and the rest go -- which
-    is right for a whole-cell box, and would be wrong for a mask.
-
-    IoU alone does not do it. A box clipped at a tile edge covers about half the cell,
-    so its IoU with the whole box is about a half whatever threshold is set, and the
-    cell ends up boxed twice: once properly and once truncated. What identifies it is
-    that nearly all of the clipped box lies inside the whole one, so a box that runs
-    into a seam is judged on containment instead.
-
-    The boxes are taken largest first, so the copy that survives a cell is its fullest
-    one. Deciding by score instead makes the answer depend on which copy the model
-    happened to be more sure of: a truncated copy can outscore the cell it was cut
-    from, and then it is the whole box that gets deleted.
-
-    Only boxes from different tiles are compared: ultralytics has already run NMS
-    inside each tile, and a second, stricter pass over that just deletes cells that
-    are genuinely lying against each other.
+    One copy of each cell wins and the rest go. A box clipped at a seam has only about
+    half the IoU of the whole one, so seam-touching boxes are judged on `containment`
+    instead, or the cell is kept twice. Taken largest first, so the fullest copy
+    survives. Only boxes from different tiles are compared -- ultralytics has already
+    run NMS within each tile.
     """
     boxed = [item for item in found if item.box is not None]
     rest = [item for item in found if item.box is None]
@@ -526,8 +434,7 @@ def _same_cell(kept: Found, item: Found, tiles: list, shape, iou: float,
                containment: float) -> bool:
     """Whether `item` is another tile's copy of the cell `kept` already stands for.
 
-    `kept` is never the smaller of the two, so the only question is whether `item` adds
-    anything: it does not if the two boxes agree, nor if it is `kept` clipped at a seam.
+    `kept` is never the smaller of the two.
     """
     if kept.label != item.label or kept.source == item.source:
         return False
@@ -562,15 +469,9 @@ def _iou(a, b) -> float:
 def scale_note(boxes: list, imgsz: int) -> str:
     """What scale cells actually reach the model at.
 
-    Ultralytics fits the LONGEST side of whatever it is handed to `imgsz`, so it is the
-    ratio of the two that is the scale and the imgsz alone says nothing without it.
-    Rounding the frame up to the multiple of 32 ultralytics insists on is why a whole
-    frame comes out a per cent over 1.00 rather than exactly on it.
-
-    Measured off the crops that will actually go in, rather than inferred from the tile
-    size and the number of them. Guided tiles are placed, so there can be exactly one
-    of them and it is a tile rather than the frame -- which the count alone cannot tell
-    apart from an untiled pass.
+    Ultralytics fits the longest side of a crop to `imgsz`, so the scale is the ratio
+    of the two. Measured off the crops in `boxes`, since a guided run can have one
+    placed tile and the count alone cannot tell that from an untiled pass.
     """
     longest = max(max(y1 - y0, x1 - x0) for y0, x0, y1, x1 in boxes)
     return f"imgsz {imgsz}: cells at {imgsz / longest:.2f}x native"
@@ -582,56 +483,52 @@ def recorded_tile(entry: dict) -> int:
 
 
 def recorded_imgsz(entry: dict, shape) -> int:
-    """The input size the index records for a model.
+    """The input size the index records for a model, used by an untiled pass.
 
-    This is what an untiled pass runs at: the frame goes in whole and at the size the
-    network wants, which is the plainest thing that can be asked of a model and the
-    only size it is known to behave at. Ultralytics fits the LONGEST side to it, so a
-    frame bigger than it arrives scaled down and `scale_note` says by how much.
-
-    Falling back to the frame's own long side where an entry records nothing is a
-    guess, but the alternative is having no number at all.
+    Falls back to the frame's own long side where the entry records nothing.
     """
     recorded = int(((entry.get("config") or {}).get("detection") or {}).get("imgsz") or 0)
     return recorded or native_imgsz(shape, 0)
 
 
+def imgsz_for(entry: dict, shape, tile: int, override: int = 0) -> int:
+    """The inference size for one frame: the same rule for every ultralytics script.
+
+    Tiled, the tile itself, so a crop reaches the model at 1.0x; untiled, the input
+    size the index records. `override` is --imgsz.
+    """
+    return int(override) or (native_imgsz(shape, tile) if tile
+                             else recorded_imgsz(entry, shape))
+
+
 def tiling_hint(entry: dict, tile: int) -> str | None:
     """Where a run is not tiling, what the index says it could tile at.
 
-    The default is one plain pass, so the tile size a model was actually trained at
-    would otherwise be recorded in the index and never mentioned by anything that runs
-    it. Said once, on the first frame, rather than left to be looked up.
+    Said once, on the first frame.
     """
     recorded = recorded_tile(entry)
     if tile or not recorded:
         return None
-    return (f"not tiling; --tile {recorded} is what the index records, and is what "
-            f"puts cells at 1.0x rather than at the scale above (--guide places those "
-            f"tiles on the cells rather than gridding them)")
+    return (f"not tiling; --tile {recorded} is what the index records, and puts cells "
+            f"at 1.0x (--guide places those tiles on the cells instead of gridding)")
 
 
 def native_imgsz(shape, tile: int) -> int:
     """The imgsz that puts a crop in front of the model at 1.0x.
 
-    The tile size normally. Where the frame is smaller than one tile there is a single
-    crop and it is the frame, so its own long side instead -- rounded up to the
-    multiple of 32 ultralytics insists on, rather than letting it letterbox a 512 px
-    frame up to 640 and present every cell 25% too large.
+    The tile size, or the frame's long side where the frame is smaller than a tile.
+    Rounded up to the multiple of 32 ultralytics requires.
     """
     edge = min(int(tile), max(shape[:2])) if tile else max(shape[:2])
     return int(-(-int(edge) // 32) * 32)
 
 
 def _core_axis(starts: list, ends: list, total: int) -> dict:
-    """Each tile edge pair -> the half-open span it owns along one axis.
+    """Each (start, end) tile edge pair -> the half-open span it owns along one axis.
 
     The spans partition the axis: neighbours meet in the middle of the strip they
-    share, so every coordinate belongs to exactly one tile and none to two.
-
-    Keyed on both edges rather than on the start alone, so two tiles that begin
-    together and end apart cannot collapse into one entry and hand the same span to
-    both -- which would leave one of them owning ground it does not cover.
+    share. Keyed on both edges, so tiles starting together but ending apart cannot
+    collapse into one entry and be handed the same span.
     """
     order = sorted(set(zip(starts, ends)))
     spans = {}
@@ -643,10 +540,9 @@ def _core_axis(starts: list, ends: list, total: int) -> dict:
 
 
 def _centroid(item: Found):
-    """Where an instance sits, whatever geometry it has: mask, box or chain.
+    """(y, x) where an instance sits, from its mask, box or chain.
 
-    None where it has nowhere to be, which is a chain none of whose nodes the model
-    saw. There is no ground for a tile to own it by.
+    None where it has nowhere to be: a chain none of whose nodes the model saw.
     """
     if item.mask is not None:
         rows, cols = np.nonzero(item.mask)
@@ -654,9 +550,7 @@ def _centroid(item: Found):
     if item.box is not None:
         x0, y0, x1, y1 = item.box
         return (y0 + y1) / 2.0, (x0 + x1) / 2.0
-    # A chain: the mean of the nodes that were visible. NaN is how an invisible one is
-    # carried, and a chain with none at all has nowhere to be -- None, so that every
-    # scheme drops it rather than putting it somewhere arbitrary and owning it there.
+    # A chain: the mean of the visible nodes. An invisible node is carried as NaN.
     if item.line is not None and np.isfinite(item.line[:, 0]).any():
         return (float(np.nanmean(item.line[:, 1])), float(np.nanmean(item.line[:, 0])))
     return None
@@ -665,20 +559,11 @@ def _centroid(item: Found):
 def stitch_by_core(found: list[Found], tiles: list, shape) -> list[Found]:
     """Keep each instance in the one tile that owns the ground it stands on.
 
-    The alternative to merging, and what StarDist's `predict_instances_big` does. Each
-    tile owns a core, the cores partition the frame, and an instance is kept only by
-    the tile whose core holds its centroid; the rest of the tile is context, there so
-    the model sees a whole object near its core's edge rather than a cut one.
-
-    Nothing is ever compared with anything, so nothing can be double-counted, and no
-    chain of pairwise joins can fuse a crowd into one blob -- which is the failure
-    merging has to be defended against. It leaves more instances cut at a seam than
-    merging does, and no mask larger than one a tile actually saw.
-
-    What it needs in exchange is that an object whose centroid sits in the core is
-    wholly inside the tile -- so the margin from core to tile edge has to exceed the
-    object's reach. Where that fails the object is kept cut rather than joined, and an
-    object cut across two cores is kept twice; see `warn_if_longer_than_overlap`.
+    StarDist's `predict_instances_big` scheme: each tile owns a core, the cores
+    partition the frame, and an instance is kept only by the tile whose core holds its
+    centroid. Nothing is compared, so nothing fuses. It needs the margin from core to
+    tile edge to exceed the object's reach; past that an object is double-counted.
+    See `warn_if_longer_than_overlap`.
     """
     rows = _core_axis([t[0] for t in tiles], [t[2] for t in tiles], shape[0])
     cols = _core_axis([t[1] for t in tiles], [t[3] for t in tiles], shape[1])
@@ -702,29 +587,17 @@ def stitch_by_core(found: list[Found], tiles: list, shape) -> list[Found]:
 def stitch_by_plan(found: list[Found], tiles: list, shape, plan: list) -> list[Found]:
     """Keep each instance in the tile the PLAN gave its cell.
 
-    Ownership again, but settled by the detector's box rather than by the instance's
-    own centroid -- which is what makes it hold. `cover` placed one tile per cell and
-    `assign` recorded which; every copy of that cell, the whole one and any a
-    neighbouring tile cut, lies inside the same box and so comes back with the same
-    owner. Exactly one copy survives, and it is the one from the tile the cell was
-    placed in, which is the tile that holds it whole.
-
-    `stitch_by_whole` decides the same question from the copy in hand, and that is the
-    difference: a copy CUT by a tile edge has its centroid pulled away from that edge,
-    the two halves of a straddling cell land on opposite sides of the boundary between
-    their tiles, and both elect themselves. Deciding by the cell keeps one of them.
-
-    An instance no box explains -- something the segmenter found and the detector did
-    not -- has no cell to be owned by, so it falls back to the tile it sits most
-    centrally in. Those are the cells `--guide-conf` is for, and the run says how many
-    there were.
-
-    The cell each instance was matched to is kept on it, which is the point of doing it
-    this way round: an animal, its body and its flagellum come out of three separate
-    predictions carrying one number, so the outputs can say that they are one cell
-    rather than three things that happen to overlap. See `outputs.numbers_for`.
+    Ownership settled by the detector's box rather than by the copy's own centroid, so
+    the two halves of a straddling cell agree on one owner instead of both electing
+    themselves. One copy survives per cell and class; where the owner tile's own pass
+    produced nothing, the least cut copy from another tile stands in. An instance no
+    box explains falls back to the tile it sits most centrally in. The matched cell is
+    kept on each instance, so body and flagellum share one number; see
+    `outputs.numbers_for`.
     """
     kept = []
+    claimed: set = set()   # (cell, class) pairs the owner tile's own pass produced
+    unclaimed: dict = {}   # ... and the other tiles' copies, kept until that is known
     for item in found:
         if item.mask is None and item.box is None and item.line is None:
             kept.append(item)
@@ -735,26 +608,39 @@ def stitch_by_plan(found: list[Found], tiles: list, shape, plan: list) -> list[F
                 kept.append(item)
             continue
         box, owner = plan[matched]
-        # The owner is the tile the cell was placed in, so it holds the cell whole and
-        # every copy of it agrees on that. A cell longer than a tile has no such tile:
-        # `assign` gave it whichever holds most of it, and a piece from any other tile
-        # would then answer to an owner that never saw it, so those are settled by
-        # where they sit instead of being dropped for disagreeing.
-        settled = (item.source == owner if _holds(tiles[owner], box)
-                   else _most_central(item, tiles, shape) == item.source)
-        if settled:
+        # A cell longer than a tile has no owner holding it whole, so its pieces are
+        # settled by where they sit rather than dropped for disagreeing.
+        if not _holds(tiles[owner], box):
+            if _most_central(item, tiles, shape) == item.source:
+                kept.append(item._replace(cell=matched + 1))
+        elif item.source == owner:
+            claimed.add((matched, item.label))
             kept.append(item._replace(cell=matched + 1))
+        else:
+            unclaimed.setdefault((matched, item.label), []).append(item)
+    # Where the owner produced nothing of this class for this cell, the least cut copy
+    # stands in rather than the cell being lost; ties go to the better score.
+    for key, copies in unclaimed.items():
+        if key in claimed:
+            continue
+        best = max(copies, key=lambda copy: (_room(copy, tiles, shape), copy.score))
+        kept.append(best._replace(cell=key[0] + 1))
     return sorted(kept, key=lambda item: -item.score)
+
+
+def _room(item: Found, tiles: list, shape) -> float:
+    """How far an instance sits from its own tile's seams. Higher is less cut."""
+    centre = _centroid(item)
+    if centre is None:
+        return float("-inf")
+    return _clearance(centre[0], centre[1], tiles[item.source], shape)
 
 
 def _planned_cell(item: Found, plan: list):
     """Which of the plan's cells this instance is part of, as an index, or None.
 
-    Scored on how much of the instance lies inside the box, because that is what being
-    part of a cell means. The centroid only breaks ties between boxes that hold equal
-    shares of it: a thin instance lying diagonally across a crowd can have its own
-    centroid over a neighbouring cell, and deciding on the centroid first therefore
-    puts the body and the flagellum of one cell on two different numbers.
+    Scored on how much of the instance lies inside the box; the centroid only breaks
+    ties, since a thin diagonal instance can have its centroid over a neighbour.
     """
     extent = _extent(item)
     if extent is None:
@@ -796,11 +682,9 @@ def _most_central(item: Found, tiles: list, shape):
 def _clearance(centre_y: float, centre_x: float, tile, shape) -> float:
     """How far a point is from the nearest SEAM of a tile, ignoring the frame's edge.
 
-    A tile edge that is also the frame's edge is not a seam: nothing was cut there and
-    there is no neighbouring tile holding the rest. Counting it would make every tile
-    along a border equally cramped, so the maximum degenerates into a tie and ownership
-    falls to the lowest tile index -- which is the one holding the cell hardest against
-    its own real seam, and so the one with the most truncated copy of it.
+    A tile edge on the frame edge is not a seam; counting it would tie every border
+    tile and hand ownership to the lowest index, which holds the most truncated copy.
+    inf where the tile has no seams at all.
     """
     ty0, tx0, ty1, tx1 = tile
     gaps = []
@@ -818,78 +702,48 @@ def _clearance(centre_y: float, centre_x: float, tile, shape) -> float:
 def stitch_by_whole(found: list[Found], tiles: list, shape) -> list[Found]:
     """Keep each instance in the one tile it sits most comfortably inside.
 
-    Ownership, like `stitch_by_core`, and for the same reason: nothing is compared with
-    anything, so nothing CAN be double-counted. What it replaces is a core, which only
-    partitions the frame while the tiles are a regular grid; guided tiles are not one,
-    so the partition has to come from the tiles themselves. Every tile holding an
-    instance's centroid is a candidate, and the one where that centroid has the most
-    room to the tile's own edges wins, ties going to the earlier tile.
-
-    It is decided from the centroid alone, and the ownership itself is an exact
-    partition: every centroid in the frame has one winner, never none and never two.
-
-    What it does NOT guarantee is that two copies of one cell agree on their centroid.
-    A copy CUT by a seam has its centroid pulled away from that seam, into its own
-    tile, and the two halves of a straddling cell are pushed to opposite sides of the
-    ownership boundary between them -- so both elect their own tile and the cell is
-    kept twice. That is why this scheme is for PLACED tiles and not for a grid: `cover`
-    puts every cell inside a tile in one piece, so the copy that matters is not cut and
-    its centroid is the cell's own. On a regular grid, where straddling cells are the
-    norm, `core` is the default instead -- it is cheaper, it draws much the same
-    boundary, and `resolve_stitch` insists on it under `--guide`.
-
-    Comparing masks instead of owning by centroid fails on exactly the objects these
-    models are for. Two copies of one thin diagonal cell, drawn a few pixels apart by
-    two tiles, share too little to pass any threshold that does not also fuse cells
-    lying against each other, so both survive and the count comes out at roughly one
-    instance per tile that saw the cell. A threshold on shared pixels is a threshold on
-    how thin an object is, and a promastigote with its flagellum is thin.
+    Ownership by centroid, for placed tiles, where cores do not partition the frame.
+    Of the tiles holding a centroid, the one leaving it most room to its own edges
+    wins; ties go to the earlier tile. It does not guarantee that two copies of one
+    cell agree on their centroid, so a cell straddling a seam is kept twice -- which
+    is why `core` stays the default on a grid.
     """
-    kept = []
-    for item in found:
-        if item.mask is None and item.box is None and item.line is None:
-            kept.append(item)
-            continue
-        if _most_central(item, tiles, shape) == item.source:
-            kept.append(item)
-    return sorted(kept, key=lambda item: -item.score)
+    # `stitch_by_plan` with nothing planned is exactly this decision, once per copy.
+    return stitch_by_plan(found, tiles, shape, [])
 
 
 def _with_cells(found: list[Found], plan: list | None) -> list[Found]:
     """Each instance told which of the plan's cells it belongs to, where one does.
 
-    The ownership schemes work this out while deciding who keeps what. Merging has no
-    such step, so under `--guide` it is done afterwards -- otherwise a merged run
-    carries no cell numbers at all, and `--guide-strict`, which keeps only instances
-    that have one, discards the entire frame.
+    The last step of every `stitch` branch, so no scheme comes back without the cell
+    numbers `--guide-strict` filters on. An instance already carrying one keeps it.
     """
     if not plan:
         return found
     labelled = []
     for item in found:
+        if item.cell:
+            labelled.append(item)
+            continue
         matched = _planned_cell(item, plan)
         labelled.append(item if matched is None else item._replace(cell=matched + 1))
     return labelled
 
 
 def resolve_stitch(how: str | None, guided: bool) -> str:
-    """The scheme to use where `--stitch` did not name one.
-
-    The tiling decides it: a grid has cores to own by, guided tiles have whole copies
-    to choose between. Naming the wrong one for the tiling in use is refused rather
-    than quietly producing a partition of the frame that is not one.
+    """The scheme to use where `--stitch` did not name one: core on a grid, whole
+    under --guide. Naming core for guided tiles is refused, since their cores do not
+    partition the frame.
     """
     if how is None:
         return "whole" if guided else "core"
     if guided and how == "core":
         raise SystemExit(
-            "--stitch core needs a regular grid: it gives every tile a core and those "
-            "cores have to partition the frame, which guided tiles do not. Use "
-            "--stitch whole, which is the default with --guide.")
+            "--stitch core needs a regular grid: guided tiles have no cores that "
+            "partition the frame. Use --stitch whole, the default with --guide.")
     if not guided and how == "whole":
-        say("note: --stitch whole owns by the tile an instance is most central in, "
-            "which works on a grid too but has no reason to beat --stitch core there; "
-            "it is --guide that puts a whole cell in the tile that wins")
+        say("note: --stitch whole works on a grid but has no reason to beat "
+            "--stitch core there")
     return how
 
 
@@ -897,47 +751,37 @@ def stitch(found: list[Found], tiles: list, shape, how: str,
            iou: float | None = None, plan: list | None = None) -> list[Found]:
     """Put the tiles' instances back together, whichever way `--stitch` asked for.
 
-    `iou` belongs to the box merger alone: ownership compares nothing and the mask
-    merger compares shapes rather than overlap, so neither has anywhere to put it. It
-    is a named argument rather than `**kwargs` so that it cannot be forwarded to a
-    stitcher that has no such argument.
+    `iou` is used by the box merger alone.
     """
     if how == "core":
-        return stitch_by_core(found, tiles, shape)
-    if how == "whole":
-        # The plan where there is one: settling a copy by the cell it belongs to beats
-        # settling it by where the copy itself happens to sit.
-        if plan:
-            return stitch_by_plan(found, tiles, shape, plan)
-        return stitch_by_whole(found, tiles, shape)
-    if any(item.mask is not None for item in found):
-        return _with_cells(merge_masks(found, tiles, shape), plan)
-    if any(item.box is not None for item in found):
-        return _with_cells(merge_boxes(found, tiles, shape,
-                                       iou=DEFAULT_IOU if iou is None else iou), plan)
-    if len(tiles) > 1 and found:
-        # Chains, from a tiled pose run. There is nothing here to overlap: merging
-        # compares regions, and a chain is an ordering. Saying so beats handing back
-        # every cell once per tile that saw it.
+        kept = stitch_by_core(found, tiles, shape)
+    elif how == "whole":
+        # Settle by the cell where there is a plan, else by where the copy sits.
+        kept = (stitch_by_plan(found, tiles, shape, plan) if plan
+                else stitch_by_whole(found, tiles, shape))
+    elif any(item.mask is not None for item in found):
+        kept = merge_masks(found, tiles)
+    elif any(item.box is not None for item in found):
+        kept = merge_boxes(found, tiles, shape,
+                           iou=DEFAULT_IOU if iou is None else iou)
+    elif len(tiles) > 1 and found:
+        # Chains, from a tiled pose run: no area to compare, no orderings to splice.
         raise SystemExit("--stitch merge cannot put chains back together: they have no "
-                         "area to compare and no way to splice two node orderings. "
-                         "Use --stitch core, which keeps each chain whole in one tile.")
-    return found
+                         "area to compare. Use --stitch core, which keeps each chain "
+                         "whole in one tile.")
+    else:
+        kept = found
+    # Cell numbers come from the plan, not the scheme, so every branch leaves here.
+    return _with_cells(kept, plan)
 
 
 def warn_if_longer_than_overlap(found: list, tile: int, overlap: float) -> None:
-    """Say so where objects are longer than the overlap is deep.
+    """Warn where objects are longer than the overlap is deep.
 
-    This is the one assumption none of the merging can make up for. A cell that fits
-    in no tile is never seen whole by the model, so the pieces are all there is: the
-    strip-span rule can rejoin two of them, but three, or two that also disagree about
-    where the cell is, cannot be recovered -- and ownership schemes double-count them
-    instead. It is easily true at the defaults on crowded data, so it is checked
-    against what the model actually found rather than assumed.
-
-    Asked of the pieces the tiles produced, before stitching. Afterwards a straddling
-    cell survives only as whichever fragment was kept, so the longest thing left is a
-    fact about the tile spacing rather than about the cells.
+    A cell longer than the overlap is whole in no tile, so merging cannot recover it
+    and ownership schemes double-count it. Must be called on the tiles' own pieces,
+    BEFORE stitching; afterwards the lengths describe the tile spacing, not the cells.
+    Silent under 5 pieces or where under 5% are over.
     """
     if not tile:
         return
@@ -956,60 +800,52 @@ def warn_if_longer_than_overlap(found: list, tile: int, overlap: float) -> None:
     if not sides or len(sides) < 5:
         return
     over = [side for side in sides if side > deep]
-    if len(over) * 20 <= len(sides):  # under 5% of them, which is the tail, not a problem
+    if len(over) * 20 <= len(sides):  # under 5%: the tail, not a problem
         return
     longest = max(sides)
-    # An overlap has to stay under the whole tile, so past a certain length no overlap
-    # is deep enough and saying to raise it is advice `settings` would refuse.
+    # Overlap must stay under 0.9, so past a certain length only a bigger tile helps.
     wider = longest / tile
     fix = (f"raise --overlap above {wider:.2f}" if wider < 0.89
            else f"run --tile {int(longest) + 32} or more")
     say(f"warning: {100 * len(over) / len(sides):.0f}% of what was found is longer "
         f"than the {deep} px overlap (longest {longest:.0f} px). Those cells fit in "
-        f"no tile whole, so no merging afterwards can make them so -- {fix}, or "
-        f"--guide to place the tiles on the cells instead.")
+        f"no tile whole -- {fix}, or --guide to place tiles on the cells.")
 
 
 def add_tiling_arguments(parser, tile: int = 0) -> None:
     """The tiling flags, shared so no two scripts can spell them differently.
 
-    Every script takes the default, 0: the whole frame in one pass, into the model at
-    the input size the index records. `tile` is here for a script that wants a
-    different one, and None still means "whatever the index records" to `settings`.
+    `tile` is the default for --tile; None means the index's recorded tile.
     """
-    parser.add_argument("--tile", type=int, default=tile,
-                        help="tile size in px. The default is 0: one pass over the "
-                             "whole frame, into the model at the input size the index "
-                             "records. Tiling is opt-in; it is what puts cells at 1.0x "
-                             "on a frame larger than that input, and the run says both "
-                             "the tile size the index records and the scale cells are "
-                             "reaching the model at")
-    parser.add_argument("--overlap", type=float, default=None,
-                        help=f"tile overlap as a fraction of the tile, 0 to 0.9 "
-                             f"(default {DEFAULT_OVERLAP} where the index says nothing)")
-    parser.add_argument("--batch", type=int, default=4,
-                        help="tiles per forward pass; lower it if the card runs out")
-    add_stitch_argument(parser)
+    group = parser.add_argument_group("tiling")
+    group.add_argument("--tile", type=int, default=tile,
+                       help="tile size in px; 0 (default) is one pass over the whole "
+                            "frame. Tiling puts cells at 1.0x")
+    group.add_argument("--overlap", type=float, default=None,
+                       help=f"tile overlap as a fraction of the tile, 0 to 0.9 "
+                            f"(default {DEFAULT_OVERLAP} where the index says nothing)")
+    group.add_argument("--batch", type=int, default=4,
+                       help="tiles per forward pass; lower it if the card runs out")
+    add_stitch_argument(group)
 
 
 def add_stitch_argument(parser) -> None:
-    """How the tiles' instances are put back together. Shared with mask2former.py."""
+    """How the tiles' instances are put back together.
+
+    `parser` is the tiling argument group where there is one, so --stitch sits with it.
+    """
     parser.add_argument("--stitch", choices=("core", "whole", "merge"), default=None,
-                        help="core (the default on a grid): keep each instance only "
-                             "in the tile whose core holds its centroid, comparing "
-                             "nothing (StarDist's scheme). It cannot fuse cells and "
-                             "leaves about half as many cut, but double-counts "
-                             "anything longer than the margin from a core to its tile "
-                             "edge. whole (the default with --guide): keep the least "
-                             "cut copy of each instance and drop the rest. merge: "
+                        help="core (default on a grid): keep each instance only in "
+                             "the tile whose core holds its centroid. whole (default "
+                             "with --guide): keep the least cut copy of each. merge: "
                              "join pieces across tiles that are one object")
 
 
 def batches(boxes: list, size: int):
     """The tile boxes in groups of `size`, one forward pass each.
 
-    Yields (index of the first tile in the group, the group), because what came out of
-    which tile is what the merging keys on.
+    Yields (index of the first tile in the group, the group); stitching keys on that
+    index.
     """
     size = max(1, int(size))
     for start in range(0, len(boxes), size):
