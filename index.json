@@ -1,6 +1,107 @@
 {
   "models": [
     {
+      "id": "leishmania-cellpose-animal",
+      "version": "v1",
+      "task": "segment",
+      "modality": "phase",
+      "framework": "cellpose",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v3/leish_cp_animal",
+      "sha256": "ab5e87a387d0aacd5b57c4f86fbc4eddbe29f2bda55f1c1506472ab0205e6f10",
+      "size": 1218643107,
+      "notes": "cpsam_v2 fine-tune, whole cell; synthetic test IoU@0.5 0.66, F1 0.80; fragments where cells overlap",
+      "config": {
+        "detection": {
+          "task": "segment"
+        },
+        "cellpose": {
+          "flow_threshold": 0.4,
+          "cellprob_threshold": -1.0,
+          "class": "animal"
+        }
+      },
+      "preprocess": {},
+      "assumes": {
+        "pixel_size_um": [
+          0.062,
+          0.325
+        ],
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
+      "id": "leishmania-cellpose-body",
+      "version": "v1",
+      "task": "segment",
+      "modality": "phase",
+      "framework": "cellpose",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v3/leish_cp_body",
+      "sha256": "d907e971d5ab822193c58cd1eaf84fbde4ad60205771f1a47f55454944207771",
+      "size": 1218642395,
+      "notes": "cpsam_v2 fine-tune, body only; synthetic test IoU@0.5 0.77, F1 0.87",
+      "config": {
+        "detection": {
+          "task": "segment"
+        },
+        "cellpose": {
+          "flow_threshold": 0.4,
+          "cellprob_threshold": 0.0,
+          "class": "body"
+        }
+      },
+      "preprocess": {},
+      "assumes": {
+        "pixel_size_um": [
+          0.062,
+          0.325
+        ],
+        "magnification": [
+          20.0,
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
+      "id": "leishmania-cellpose-flagellum",
+      "version": "v1",
+      "task": "segment",
+      "modality": "phase",
+      "framework": "cellpose",
+      "url": "https://github.com/bgraedel/leishmania-models/releases/download/models-v3/leish_cp_flag",
+      "sha256": "29caf2c2ca8df5ee1f34b0cb9b7d7e6658d6da7d579c4d007e5bb87f1cb9ae7a",
+      "size": 1218642395,
+      "notes": "cpsam_v2 fine-tune, flagellum; synthetic test IoU@0.5 0.57, recall-limited; trained at 40-100x",
+      "config": {
+        "detection": {
+          "task": "segment"
+        },
+        "cellpose": {
+          "flow_threshold": 0.4,
+          "cellprob_threshold": -1.0,
+          "class": "flagellum"
+        }
+      },
+      "preprocess": {},
+      "assumes": {
+        "pixel_size_um": [
+          0.062,
+          0.163
+        ],
+        "magnification": [
+          40.0,
+          60.0,
+          100.0
+        ]
+      }
+    },
+    {
       "id": "leishmania-detect",
       "version": "v1",
       "task": "detect",
