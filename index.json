@@ -264,7 +264,7 @@
           "task": "pose"
         },
         "tiling": {
-          "tile": 1280
+          "tile": 640
         },
         "keypoints": {
           "nodes": [
