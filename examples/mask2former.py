@@ -4,7 +4,7 @@
 # dependencies = [
 #     "torch",
 #     # --guide places tiles with the detector, an ultralytics checkpoint.
-#     "ultralytics",
+#     "ultralytics>=8.4.142",
 #     # transformers 5 builds its image processors on torchvision.
 #     "torchvision",
 #     "transformers",
@@ -61,7 +61,7 @@ import numpy as np
 from fetch import fetch, on_disk
 from guide import add_guide_arguments, guide_from, tiling_on
 from outputs import (Found, add_mask_arguments, add_output_arguments, cleanup_from,
-                     frame_count, instance_mask, parse_frames, progress,
+                     frame_count, instance_mask, parse_frames, progress, runs_of,
                      resolve_classes, say, writers_for)
 from run import pick_device, run_frames
 from tiling import (DEFAULT_OVERLAP, add_stitch_argument, batches, resolve_stitch,
@@ -163,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         weights, entry = fetch(args.id, args.version)
     tile, overlap = settings(entry, args.tile, args.overlap)
-    numbers = parse_frames(args.frames, frame_count(args.image))
+    name = args.id if not args.weights else weights.stem
+    jobs = runs_of(args, name)
 
     device = pick_device(args.device)
     how = resolve_stitch(args.stitch, args.guide)
@@ -196,9 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     names = dict(zip(sorted(names), classes))  # --classes reaches the instances too
     cleanup = cleanup_from(args)
 
-    writers = writers_for(args, args.image,
-                          args.id if not args.weights else weights.stem,
-                          classes, numbers)
+    numbers: list = []  # the current run's frames; `announce` reads it
 
     def square(frame) -> int:
         """The size every crop is padded out to before it goes in.
@@ -227,9 +226,12 @@ def main(argv: list[str] | None = None) -> int:
         return predict(model, processor, names, frame, boxes, args.conf, args.batch,
                        device, cleanup, square=square(frame))
 
-    run_frames(args.image, numbers, writers, run, tile=tile, overlap=overlap,
-               how=how, guide=guide, strict=args.guide_strict, suffix=suffix,
-               announce=announce)
+    for job in progress(jobs, "images"):
+        numbers = parse_frames(args.frames, frame_count(job.image))
+        writers = writers_for(job, job.image, name, classes, numbers)
+        run_frames(job.image, numbers, writers, run, tile=tile, overlap=overlap,
+                   how=how, guide=guide, strict=args.guide_strict, suffix=suffix,
+                   announce=announce, item=job.item)
     return 0
 
 

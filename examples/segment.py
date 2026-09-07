@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "ultralytics",
+#     "ultralytics>=8.4.142",
 #     "tifffile",
 #     "roifile",
 #     "tqdm",
@@ -37,8 +37,8 @@ from fetch import fetch, on_disk
 from guide import add_guide_arguments, guide_from, tiling_on
 from outputs import (Found, add_mask_arguments, add_output_arguments, cleanup_from,
                      frame_count, instance_mask, parse_frames, progress,
-                     resolve_classes, say, writers_for)
-from run import run_frames
+                     resolve_classes, runs_of, say, writers_for)
+from run import head_options, run_frames
 from tiling import (add_tiling_arguments, batches, imgsz_for, resolve_stitch,
                     scale_note, settings, tiling_hint)
 
@@ -59,6 +59,10 @@ def arguments() -> argparse.ArgumentParser:
     parser.add_argument("--imgsz", type=int, default=0, help="override the inference size")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, mps, 0, ...")
+    parser.add_argument("--nms", type=float, default=None,
+                        help="run the model's one-to-many head through NMS at this "
+                             "IoU instead of its end-to-end head, which runs otherwise; "
+                             "the two keep different cells in a crowd")
     add_tiling_arguments(parser)
     add_guide_arguments(parser)
     add_mask_arguments(parser)
@@ -73,18 +77,16 @@ def main(argv: list[str] | None = None) -> int:
 
     weights, entry = (on_disk(args.weights) if args.weights
                       else fetch(MODEL, args.version))
+    name = MODEL if not args.weights else weights.stem
+    jobs = runs_of(args, name)
     tile, overlap = settings(entry, args.tile, args.overlap)
     tile, overlap = tiling_on(args, entry, tile, overlap)
-    numbers = parse_frames(args.frames, frame_count(args.image))
     device = None if args.device == "auto" else args.device
     how = resolve_stitch(args.stitch, args.guide)
     guide = guide_from(args, device, args.batch)
     model = YOLO(weights)
     classes = resolve_classes(model.names, args.classes)
-
-    writers = writers_for(args, args.image,
-                          MODEL if not args.weights else weights.stem,
-                          classes, numbers)
+    numbers: list = []  # the current run's frames; `announce` reads it
     cleanup = cleanup_from(args)
 
     def sizing(frame):
@@ -106,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
             # retina_masks keeps the masks at the tile's own resolution; without it a
             # flagellum a few pixels wide is lost to the letterboxed size.
             results = model.predict(crops, imgsz=imgsz, conf=args.conf, device=device,
-                                    retina_masks=True, verbose=False)
+                                    retina_masks=True, verbose=False,
+                                    **head_options(args.nms))
             for tile_index, ((y0, x0, _, _), result) in enumerate(zip(group, results),
                                                                   first):
                 if result.masks is None:
@@ -122,8 +125,12 @@ def main(argv: list[str] | None = None) -> int:
                                        mask=patch, origin=origin, source=tile_index))
         return found
 
-    run_frames(args.image, numbers, writers, predict, tile=tile, overlap=overlap,
-               how=how, guide=guide, strict=args.guide_strict, announce=announce)
+    for job in progress(jobs, "images"):
+        numbers = parse_frames(args.frames, frame_count(job.image))
+        writers = writers_for(job, job.image, name, classes, numbers)
+        run_frames(job.image, numbers, writers, predict, tile=tile, overlap=overlap,
+                   how=how, guide=guide, strict=args.guide_strict, announce=announce,
+                   item=job.item)
     return 0
 
 

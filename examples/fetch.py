@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -231,23 +232,44 @@ def _pages(file: Path) -> tuple:
         return count, size
 
 
+def name_order(path: Path):
+    """Sort key for a folder's files: the order a file browser shows them.
+
+    Numbers by value, so frame_2 comes before frame_10, and case ignored, so Frame_3 sits
+    between them. Plain `sorted` puts frame_10 first and every capital before every
+    lower-case letter, and then the T axis is not the order the frames were taken in.
+    """
+    parts = re.split(r"(\d+)", path.name)  # str, digits, str, ..., str: types line up
+    return [int(part) if part.isdigit() else part.lower() for part in parts], path.name
+
+
+def images_in(folder) -> list:
+    """The image files in a folder, in name order (see `name_order`). Non-images are
+    passed over; a folder with none is refused."""
+    folder = Path(folder)
+    files = sorted((item for item in folder.iterdir()
+                    if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES),
+                   key=name_order)
+    if not files:
+        raise SystemExit(f"{folder}: no images here "
+                         f"(looking for {', '.join(IMAGE_SUFFIXES)})")
+    return files
+
+
 def frames_in(path) -> list:
     """Every frame the input offers, as (file, index within that file) pairs.
 
-    A file is its own pages; a folder is every image in it, in name order, joined into
-    one sequence, so `--frames` and the outputs' T axis count across the whole folder.
-    Worked out once per path, since it costs a header read per file.
+    A file is its own pages. A folder given here is every image in it, in name order,
+    joined into one sequence -- what `--sequence` asks for; `outputs.runs_of` is what
+    makes a folder one run per image, and hands the files here one at a time. Worked
+    out once per path, since it costs a header read per file.
     """
     path = Path(path)
     cached = _SEQUENCES.get(str(path))
     if cached is not None:
         return cached
     if path.is_dir():
-        files = sorted(item for item in path.iterdir()
-                       if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES)
-        if not files:
-            raise SystemExit(f"{path}: no images here "
-                             f"(looking for {', '.join(IMAGE_SUFFIXES)})")
+        files = images_in(path)
     elif path.is_file():
         files = [path]
     else:

@@ -8,6 +8,8 @@ Only the model call differs between scripts, so each passes its own `predict` to
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fetch import load_image
 from outputs import Found, progress, report, say
 from tiling import batches, describe, slices, stitch, warn_if_longer_than_overlap
@@ -33,8 +35,23 @@ def pick_device(name: str):
     return torch.device("cpu")
 
 
+def head_options(nms) -> dict:
+    """What picks an ultralytics model's head: the end-to-end one, unless `--nms` asks
+    for the one-to-many head put through NMS at that IoU.
+
+    `nms=False` is the end-to-end head and `nms=None` external NMS, in ultralytics
+    8.4.142 and later; said outright because the default there is NMS at 0.7, not the
+    end-to-end head a YOLO26 checkpoint is published for. Ultralytics reads these when
+    it first builds a model's predictor and not again, so they go on every call and
+    hold for the run. A checkpoint with no end-to-end head runs its one head either
+    way, at the IoU given or ultralytics' own.
+    """
+    return {"nms": False} if nms is None else {"nms": None, "iou": float(nms)}
+
+
 def detect_tiles(model, frame, grid: list, imgsz: int, conf: float, device,
-                 batch: int, names: list, bar: bool = True) -> list[Found]:
+                 batch: int, names: list, bar: bool = True,
+                 nms: float | None = None) -> list[Found]:
     """An ultralytics detector over one frame's crops -> box `Found`s in frame
     coordinates, each carrying the index of the tile it came out of.
 
@@ -47,7 +64,7 @@ def detect_tiles(model, frame, grid: list, imgsz: int, conf: float, device,
     for first, group in groups:
         crops = [frame[y0:y1, x0:x1] for y0, x0, y1, x1 in group]
         results = model.predict(crops, imgsz=imgsz, conf=conf, device=device,
-                                verbose=False)
+                                verbose=False, **head_options(nms))
         for index, ((y0, x0, _, _), result) in enumerate(zip(group, results), first):
             for label, score, corners in zip(result.boxes.cls.tolist(),
                                              result.boxes.conf.tolist(),
@@ -62,7 +79,7 @@ def detect_tiles(model, frame, grid: list, imgsz: int, conf: float, device,
 def run_frames(image, numbers: list, writers, predict, *, tile: int = 0,
                overlap: float = 0.0, how: str = "core", guide=None,
                strict: bool = False, iou: float | None = None,
-               suffix=None, announce=None, epilogue=None) -> None:
+               suffix=None, announce=None, epilogue=None, item=None) -> None:
     """Run `predict` over every frame, and do the same things to what comes back.
 
     `predict(frame, boxes) -> list[Found]` is the model call: `boxes` are tiles
@@ -70,18 +87,25 @@ def run_frames(image, numbers: list, writers, predict, *, tile: int = 0,
     carrying the index of the tile it came out of. `announce(frame, boxes)` prints
     under the layout line on frame 0, `suffix(frame, boxes)` appends to it, and
     `epilogue(number, found)` prints after each frame's report.
+
+    `item` is (which, of how many) when this is one image of a folder: the layout line
+    then names the image, `announce` speaks for the first image only, and every frame
+    gets one line rather than the first getting its instances listed.
     """
     warned = False
-    for position, number in progress(list(enumerate(numbers)), "frames"):
+    batch = item is not None
+    head = f"[{item[0] + 1}/{item[1]}] {Path(image).name}: " if batch else ""
+    for position, number in progress(list(enumerate(numbers)), "frames",
+                                     leave=not batch):
         frame = load_image(image, number)
         boxes = slices(*frame.shape[:2], tile, overlap)
         planned, note, plan = (guide.plan(frame, tile, overlap) if guide
                                else (None, None, None))
         boxes = planned or boxes
         if position == 0:
-            say((note or describe(frame.shape, boxes, tile, overlap))
+            say(head + (note or describe(frame.shape, boxes, tile, overlap))
                 + (suffix(frame, boxes) if suffix is not None else ""))
-            if announce is not None:
+            if announce is not None and (not batch or item[0] == 0):
                 announce(frame, boxes)
         elif guide is not None and planned is None and tile:
             # A guided frame that fell back to the grid; only frame 0 is described above.
@@ -104,7 +128,7 @@ def run_frames(image, numbers: list, writers, predict, *, tile: int = 0,
         if plan and strict:
             loose = sum(1 for item in found if not item.cell)
             found = [item for item in found if item.cell]
-        report(number, found, len(numbers), loose)
+        report(number, found, len(numbers), loose, brief=batch)
         if epilogue is not None:
             epilogue(number, found)
         writers.add(position, number, frame, found)

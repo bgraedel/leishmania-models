@@ -86,9 +86,10 @@ def cover(boxes: list, shape, tile: int, pad: int = 0) -> tuple[list, list]:
     possible.
 
     Interval stabbing per axis -- rows first, then each row's columns -- so the result
-    is optimal along each axis, not over the plane. `pad` asks for that much clear
-    space around each cell, given up where there is no room. Boxes are expected to lie
-    inside the frame.
+    is optimal along each axis, not over the plane. Which axis goes first can cost a
+    tile, so it is planned both ways round and the smaller plan kept. `pad` asks for
+    that much clear space between each cell and any seam, given up where there is no
+    room. Boxes are expected to lie inside the frame.
 
     -> (tiles, boxes longer than one tile, which no tile can hold whole)
     """
@@ -99,34 +100,52 @@ def cover(boxes: list, shape, tile: int, pad: int = 0) -> tuple[list, list]:
     fitted, oversize = [], []
     for box in boxes:
         x0, y0, x1, y1 = box
-        down = _origins(y0, y1, height, tile, pad)
-        across = _origins(x0, x1, width, tile, pad)
-        if down is None or across is None:
+        if (_origins(y0, y1, height, tile, pad) is None
+                or _origins(x0, x1, width, tile, pad) is None):
             oversize.append(box)
         else:
-            fitted.append((down, across, box))
+            fitted.append(box)
+    # A cell longer than the tile gets a tile of its own, centred on it. Those are in
+    # the plan before the rest is settled, so a tile they make redundant is dropped.
+    pinned = list(dict.fromkeys(_tile_at(*_middle_of(box, shape, tile), shape, tile)
+                                for box in oversize))
 
-    # A box several rows could hold goes to the first, so later rows stay emptier.
-    rows = _stab([down for down, _, _ in fitted])
+    down = _plan(fitted, shape, tile, pad, pinned)
+    flipped = _plan([(y0, x0, y1, x1) for x0, y0, x1, y1 in fitted], (width, height),
+                    tile, pad, [(x0, y0, x1, y1) for y0, x0, y1, x1 in pinned])
+    across = [(x0, y0, x1, y1) for y0, x0, y1, x1 in flipped]
+    return (across if len(across) < len(down) else down), oversize
+
+
+def _plan(boxes: list, shape, tile: int, pad: int, pinned: list) -> list:
+    """Stab the rows, then each row's columns, then drop and recentre until settled.
+
+    `pinned` tiles are already decided and stay put, but count: a planned tile they
+    make redundant goes.
+    """
+    spans = [(_origins(y0, y1, shape[0], tile, pad), _origins(x0, x1, shape[1], tile, pad))
+             for x0, y0, x1, y1 in boxes]
+    rows = _stab([down for down, _ in spans])
     mine: dict = {y: [] for y in rows}
-    for down, across, _ in fitted:
+    # A box several rows could hold goes to the first, so later rows stay emptier.
+    for down, across in spans:
         for y in rows:
             if down[0] <= y <= down[1]:
                 mine[y].append(across)
                 break
     tiles = [_tile_at(y, x, shape, tile) for y in rows for x in _stab(mine[y])]
-
-    held = [box for _, _, box in fitted]
     # Recentring changes which boxes each tile holds, so drop and recentre alternate
-    # until neither changes anything, ending on a recentre.
+    # until neither changes anything, ending on a recentre. Centred while settling:
+    # a tile in the middle of its room reaches furthest and so absorbs the most
+    # neighbours; only then is one that can be moved flush with a frame edge.
     for _ in range(_SETTLE):
-        settled = _recentre(_drop_redundant(tiles, held), held, shape, tile, pad)
+        settled = _recentre(_drop_redundant(tiles, boxes, pinned), boxes, shape, tile,
+                            pad)
         if settled == tiles:
             break
         tiles = settled
-    # A cell longer than the tile gets a tile of its own, centred on it.
-    tiles += [_tile_at(*_middle_of(box, shape, tile), shape, tile) for box in oversize]
-    return list(dict.fromkeys(tiles)), oversize
+    tiles = _recentre(tiles, boxes, shape, tile, pad, flush=True)
+    return list(dict.fromkeys(tiles + pinned))
 
 
 def assign(tiles: list, boxes: list) -> list:
@@ -166,15 +185,25 @@ def _stab(spans: list) -> list:
 
 
 def _origins(near: float, far: float, total: int, tile: int, pad: int):
-    """(lo, hi): the origins of a `tile` that hold [near, far] whole, or None."""
+    """(lo, hi): the origins of a `tile` that hold [near, far] whole, or None.
+
+    With `pad`, the origins that also leave that much between the cell and the tile's
+    edges. On a side where the frame edge is closer than that, the pad is given up --
+    no origin can move a frame edge away from a cell -- and kept on the other side,
+    which is the seam that a tile can be placed clear of. Where the pad cannot be had
+    on either side, the origins that merely hold the cell.
+    """
     near, far = int(np.floor(near)), int(np.ceil(far))
     room = max(0, total - tile)
     lo, hi = max(0, far - tile), min(room, near)
     if lo > hi:
         return None  # longer than the tile; no origin holds it
     want = min(int(pad), (tile - (far - near)) // 2)
-    inner = max(lo, far + want - tile), min(hi, near - want)
-    return inner if want > 0 and inner[0] <= inner[1] else (lo, hi)
+    if want <= 0:
+        return lo, hi
+    inner = (max(lo, far + want - tile) if far + want <= total else lo,
+             min(hi, near - want) if near - want >= 0 else hi)
+    return inner if inner[0] <= inner[1] else (lo, hi)
 
 
 def _tile_at(y: int, x: int, shape, tile: int) -> tuple:
@@ -188,24 +217,27 @@ def _holds(tile, box) -> bool:
     return tx0 <= x0 and ty0 <= y0 and x1 <= tx1 and y1 <= ty1
 
 
-def _drop_redundant(tiles: list, boxes: list) -> list:
-    """Drop tiles whose every box some other tile already holds whole.
+def _drop_redundant(tiles: list, boxes: list, pinned: list = ()) -> list:
+    """Drop tiles whose every box some other tile, or a pinned one, already holds whole.
 
     Per-axis minimality does not make the rectangle minimal. Tried least-useful first,
     so dropping one cannot make a more useful one look redundant.
     """
     tiles = list(dict.fromkeys(tiles))
     held = [{i for i, box in enumerate(boxes) if _holds(tile, box)} for tile in tiles]
+    fixed = {i for tile in pinned for i, box in enumerate(boxes) if _holds(tile, box)}
     kept = set(range(len(tiles)))
     for index in sorted(range(len(tiles)), key=lambda i: len(held[i])):
-        elsewhere = set().union(*[held[j] for j in kept if j != index] or [set()])
+        elsewhere = fixed.union(*[held[j] for j in kept if j != index])
         if held[index] <= elsewhere:
             kept.discard(index)
     return [tile for index, tile in enumerate(tiles) if index in kept]
 
 
-def _recentre(tiles: list, boxes: list, shape, tile: int, pad: int = 0) -> list:
-    """Move each tile to the middle of the room its own boxes leave it.
+def _recentre(tiles: list, boxes: list, shape, tile: int, pad: int = 0,
+              flush: bool = False) -> list:
+    """Move each tile to the middle of the room its own boxes leave it, or with
+    `flush`, against a frame edge where that room reaches one; see `_settle`.
 
     Stabbing lands a tile edge exactly on a box edge, which a model reads as a cut
     cell. Every origin in the range holds the same boxes. Tiles holding nothing go.
@@ -220,18 +252,37 @@ def _recentre(tiles: list, boxes: list, shape, tile: int, pad: int = 0) -> list:
     moved = []
     for index in sorted(mine):
         held = mine[index]
-        down = _padded(held, 1, 3, height, tile, pad)
-        across = _padded(held, 0, 2, width, tile, pad)
-        moved.append(_tile_at(sum(down) // 2, sum(across) // 2, shape, tile))
+        down, margin_down = _padded(held, 1, 3, height, tile, pad)
+        across, margin_across = _padded(held, 0, 2, width, tile, pad)
+        moved.append(_tile_at(_settle(down, margin_down, height, tile, flush),
+                              _settle(across, margin_across, width, tile, flush),
+                              shape, tile))
     return moved
 
 
+def _settle(span: tuple, margin: int, total: int, tile: int, flush: bool) -> int:
+    """Which of a range of origins to use.
+
+    The middle, which at least lands no tile edge exactly on a cell. With `flush`, and
+    where every origin in the range keeps some margin, the one against a frame edge if
+    the range reaches one: a tile edge there is no seam, and the cells' clearance from
+    the seams that remain is the range's guarantee.
+    """
+    lo, hi = span
+    if flush and margin > 0:
+        if lo == 0:
+            return 0
+        if hi >= max(0, total - tile):
+            return hi
+    return (lo + hi) // 2
+
+
 def _padded(boxes: list, near: int, far: int, total: int, tile: int, pad: int) -> tuple:
-    """The origins holding every box with `pad` clear of it, else merely holding them.
+    """((lo, hi), margin): the origins holding every box with `margin` clear of any
+    seam, the full `pad` where that is possible, else the widest margin that is.
 
     `pad` is clear space around each box, so the ranges are intersected per box, not
-    taken around their hull. Where the full `pad` is impossible, the widest margin
-    that works for all of them is found by bisection.
+    taken around their hull. The widest margin is found by bisection.
     """
     def reach(want):
         spans = [_origins(box[near], box[far], total, tile, want) for box in boxes]
@@ -239,14 +290,14 @@ def _padded(boxes: list, near: int, far: int, total: int, tile: int, pad: int) -
 
     lo, hi = reach(pad)
     if lo <= hi:
-        return lo, hi
+        return (lo, hi), int(pad)
     low, high = 0, int(pad)
     while low < high:
         middle = (low + high + 1) // 2
         first, last = reach(middle)
         low, high = (middle, high) if first <= last else (low, middle - 1)
     lo, hi = reach(low)
-    return (lo, hi) if lo <= hi else reach(0)
+    return ((lo, hi), low) if lo <= hi else (reach(0), 0)
 
 
 def _middle_of(box, shape, tile: int) -> tuple:

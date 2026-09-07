@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "ultralytics",
+#     "ultralytics>=8.4.142",
 #     "tifffile",
 #     "roifile",
 #     "tqdm",
@@ -29,8 +29,8 @@ import argparse
 from pathlib import Path
 
 from fetch import fetch, on_disk
-from outputs import (add_output_arguments, frame_count, parse_frames,
-                     resolve_classes, say, writers_for)
+from outputs import (add_output_arguments, frame_count, parse_frames, progress,
+                     resolve_classes, runs_of, say, writers_for)
 from run import detect_tiles, run_frames
 from tiling import (DEFAULT_IOU, add_tiling_arguments, imgsz_for, resolve_stitch,
                     scale_note, settings, tiling_hint)
@@ -56,6 +56,10 @@ def arguments() -> argparse.ArgumentParser:
                              f"overlapping more than this are one cell (default "
                              f"{DEFAULT_IOU})")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, mps, 0, ...")
+    parser.add_argument("--nms", type=float, default=None,
+                        help="run the model's one-to-many head through NMS at this "
+                             "IoU instead of its end-to-end head, which runs otherwise; "
+                             "the two keep different cells in a crowd")
     add_tiling_arguments(parser)
     add_output_arguments(parser)
     return parser
@@ -72,15 +76,13 @@ def main(argv: list[str] | None = None) -> int:
 
     weights, entry = (on_disk(args.weights) if args.weights
                       else fetch(MODEL, args.version))
+    name = MODEL if not args.weights else weights.stem
+    jobs = runs_of(args, name)
     tile, overlap = settings(entry, args.tile, args.overlap)
-    numbers = parse_frames(args.frames, frame_count(args.image))
     device = None if args.device == "auto" else args.device
     model = YOLO(weights)
     classes = resolve_classes(model.names, args.classes)
-
-    writers = writers_for(args, args.image,
-                          MODEL if not args.weights else weights.stem,
-                          classes, numbers)
+    numbers: list = []  # the current run's frames; `announce` reads it
 
     def sizing(frame):
         return imgsz_for(entry, frame.shape, tile, args.imgsz)
@@ -94,10 +96,13 @@ def main(argv: list[str] | None = None) -> int:
 
     def predict(frame, boxes):
         return detect_tiles(model, frame, boxes, sizing(frame), args.conf, device,
-                            args.batch, classes)
+                            args.batch, classes, nms=args.nms)
 
-    run_frames(args.image, numbers, writers, predict, tile=tile, overlap=overlap,
-               how=how, iou=args.iou, announce=announce)
+    for job in progress(jobs, "images"):
+        numbers = parse_frames(args.frames, frame_count(job.image))
+        writers = writers_for(job, job.image, name, classes, numbers)
+        run_frames(job.image, numbers, writers, predict, tile=tile, overlap=overlap,
+                   how=how, iou=args.iou, announce=announce, item=job.item)
     return 0
 
 

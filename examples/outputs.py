@@ -3,6 +3,9 @@
 
 Each script builds a list of `Found` per frame; everything else happens here.
 
+    a folder             one run per image in it, each image's outputs named after it
+                         inside the folders --out, --tiff and --rois name
+    --sequence           a folder as one movie instead: one stack across its images
     --frames 0-99        a range; every output grows a T axis
     --color instance     a hue per instance instead of a colour per class
     --tiff labels.tif    ImageJ hyperstack, one channel per class, pixel value the
@@ -565,6 +568,62 @@ def add_output_arguments(parser) -> None:
     group.add_argument("--classes", default=None,
                        help="rename the model's classes, in label-id order, e.g. "
                             "body,flagellum")
+    group.add_argument("--sequence", action="store_true",
+                       help="run a folder as one movie, its images in name order, one "
+                            "stack and one RoiSet across them, --frames counting "
+                            "across the folder. Without it every image in a folder is "
+                            "its own run, with its own outputs named after it")
+
+
+def runs_of(args, model: str, writes: bool = True) -> list:
+    """What to run: one namespace per run, `image` plus its own --out, --tiff and
+    --rois, and an `item` saying which of how many it is (None for a run on its own).
+
+    A file is one run. A folder is one run per image in it, in name order, each writing
+    its own outputs named after the image -- `<stem>.<model>.png`, `-labels.tif`,
+    `-rois.zip` -- inside the folders --out, --tiff and --rois name; the overlay's
+    default folder is beside the input, named after it and the model. `--sequence`
+    keeps a folder as one run: its images as one movie, one stack and one RoiSet out.
+    `writes` off is for a script with no outputs to name.
+    """
+    from copy import copy
+    from fetch import IMAGE_SUFFIXES, images_in
+
+    image = Path(args.image)
+    if not image.is_dir() or getattr(args, "sequence", False):
+        job = copy(args)
+        job.item = None
+        return [job]
+    files = images_in(image)
+    folders: dict = {}
+    for name, _, what in (OUTPUT_SET if writes else ()):
+        given = getattr(args, name, None)
+        if given is None:
+            if name != "out":
+                continue
+            given = image.parent / f"{image.name}.{model}"
+        given = Path(given)
+        if given.suffix.lower() in IMAGE_SUFFIXES + (".zip",) and not given.is_dir():
+            raise SystemExit(
+                f"--{name} {given}: a folder of images writes one {what} per image, "
+                f"so --{name} names a folder to put them in. --sequence runs the "
+                f"folder as one movie, with one {what} for all of it.")
+        folders[name] = given
+    jobs = []
+    for index, file in enumerate(files):
+        job = copy(args)
+        job.image = file
+        job.item = (index, len(files))
+        for name, suffix, _ in OUTPUT_SET:
+            setattr(job, name, (folders[name] / f"{file.stem}.{model}{suffix}"
+                                if name in folders else None))
+        jobs.append(job)
+    for folder in folders.values():
+        folder.mkdir(parents=True, exist_ok=True)
+    say(f"{image}: {len(files)} images, one run each"
+        + (f"; outputs in {', '.join(sorted({str(f) for f in folders.values()}))}"
+           if folders else ""))
+    return jobs
 
 
 def writers_for(args, image, model: str, classes, numbers: list) -> "Writers":
@@ -603,10 +662,12 @@ def add_mask_arguments(parser) -> None:
                        help="drop an instance smaller than this many px altogether")
 
 
-def report(number: int, found: list[Found], total: int, dropped: int = 0) -> None:
+def report(number: int, found: list[Found], total: int, dropped: int = 0,
+           brief: bool = False) -> None:
     """One line per frame over a range, the whole list for a single frame.
 
-    `dropped` is what `--guide-strict` discarded.
+    `dropped` is what `--guide-strict` discarded; `brief` asks for the one line even
+    for a single frame, as one image of a folder gets.
     """
     from collections import Counter
 
@@ -619,7 +680,7 @@ def report(number: int, found: list[Found], total: int, dropped: int = 0) -> Non
                     + (f", {loose} matching none of them" if loose else ""))
     if dropped:
         summary += f"; {dropped} discarded as matching no detected cell"
-    if total > 1:
+    if total > 1 or brief:
         say(f"  frame {number}: {len(found)} instances -- {summary}")
         return
     say(f"{len(found)} instances: {summary}")

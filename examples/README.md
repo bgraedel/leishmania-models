@@ -30,7 +30,9 @@ uv run examples/gui.py
 ```
 
 tkinter, so nothing to install. Pick a model, point it at a file or a folder, pick an
-output folder, press Run; the output streams into the bottom pane.
+output folder, press Run; the output streams into the bottom pane. A folder of images
+is one run per image, and the scripts name each image's outputs themselves, so for a
+folder the window hands them the output folder alone.
 
 **The form is built from each script's own `arguments()` parser**, so a flag added to a
 script appears here with no edit to `gui.py`. Only settings moved off their default are
@@ -82,7 +84,7 @@ uv run examples/cellpose_seg.py cells.tif --niter 600
 Or install them yourself and use any Python 3.9+:
 
 ```bash
-pip install ultralytics tifffile tqdm                              # detect, segment, pose
+pip install "ultralytics>=8.4.142" tifffile tqdm                   # detect, segment, pose
 pip install torch torchvision transformers scipy pillow tifffile   # mask2former.py
 pip install "cellpose>=4.0.1" scipy                                # cellpose_seg.py
 pip install roifile                                                # for --rois
@@ -101,6 +103,15 @@ uv run --index https://download.pytorch.org/whl/cu124 examples/detect.py cells.t
 `--device` takes `auto` (default), `cpu`, `cuda`, `mps`, or a CUDA index. If an `mps`
 run stops on a missing Metal kernel, set `PYTORCH_ENABLE_MPS_FALLBACK=1`.
 
+`--nms 0.5` runs an ultralytics model's one-to-many head through NMS at that IoU
+instead of its end-to-end head, which the scripts run otherwise. They say so outright,
+since ultralytics 8.4.142 itself defaults a YOLO26 model to NMS at 0.7, and they need
+that version or newer for its `nms` argument. The two heads keep different cells in a
+crowd: on one 1392x1040 frame the detector found 39 cells end-to-end and 49, 42 and 35
+with NMS at 0.7, 0.5 and 0.3. `--guide-nms` does the same for the detector `--guide`
+runs. `detect.py`'s `--iou` is something else: the box merger's threshold under
+`--stitch merge`.
+
 Weights cache in `~/.cache/leishmania-models`; `LEISHMANIA_MODELS_INDEX=index.json`
 reads a local index, `LEISHMANIA_MODELS_CACHE` moves the cache.
 
@@ -111,9 +122,16 @@ what the model needs, and the outputs are named after the file.
 
 ## Input
 
-A `.tif` stack, a single image, or a folder. A folder is one sequence in name order, a
-stack in it contributing its pages in turn, so `--frames`, the T axis and the progress
-all count across it. Mixed formats are fine; non-images are ignored.
+A `.tif` stack, a single image, or a folder. A folder is one run per image in it, in
+name order -- a file browser's, `frame_2` before `frame_10`, case ignored -- each
+writing its own outputs, named after the image, into the folders `--out`, `--tiff` and
+`--rois` name; see [Outputs](#outputs). Mixed formats are fine; non-images are
+ignored. `--frames` applies within each image, so a folder of stacks runs frame 0 of
+every stack unless told otherwise.
+
+`--sequence` runs a folder as one movie instead: its images in name order, a stack in
+it contributing its pages in turn, so `--frames`, the T axis and the progress all count
+across the folder, and one stack and one RoiSet come out.
 
 `--frames` takes `0` (default), `10-19`, `10-`, `0-499:5` or `all`.
 
@@ -207,7 +225,11 @@ python guide.py cells.tif                 # the plan alone
 
 A tile at origin `o` holds a box whole when `far - tile <= o <= near`, so the fewest
 tiles is interval stabbing. `tiling.cover` solves it once down the frame and once across
-each row, drops tiles nothing needs, and centres what is left.
+each row, drops tiles nothing needs, and centres what is left. Stabbing one axis and then
+the other is optimal along each axis but not over the plane, and which axis goes first
+can cost a tile, so both orders are planned and the smaller kept; on random frames that
+leaves about one plan in twenty a tile over the true minimum. A tile is settled flush
+with a frame edge where its margin allows, since an edge there is no seam.
 
 ```
 1392x1040: 7 guided tiles of 640 px for 45 detected cells, 45 of them whole (6 on the grid)
@@ -223,8 +245,12 @@ that matched a cell.
 A guided run looks only where the detector pointed, so a cell it missed is never
 segmented. `--guide-conf` is the dial, and lower is safer here than for detection: a
 false box costs tile area, a missed one costs a cell. With no detections the frame falls
-back to the grid and says so. `--guide-pad` asks for clear space around each cell, given
-up at a frame edge and where one tile serves cells too far apart to pad all of them.
+back to the grid and says so. `--guide-pad` asks for clear space between each cell and
+its tile's edges, given up on a side where the frame edge is closer than that, and
+where one tile serves cells too far apart to pad all of them. A tile whose room reaches
+a frame edge is then settled flush with it, since an edge there is no seam.
+`--guide-nms` runs the detector with NMS at that IoU instead of end-to-end, as `--nms`
+does for a segmenter; a duplicated box costs a plan a cell number, a missed one a cell.
 
 ### pose
 
@@ -265,6 +291,14 @@ channel 2 vanishes over a single-channel movie.
 
 **`--color class|instance`** — a colour per class, or a hue per instance by the golden
 angle. Nothing tracks between frames, so instance hues change frame to frame.
+
+**A folder of images** makes each of these flags name a *folder*, and every image
+writes its own set into it, named after itself and the model: `cells.tif` gives
+`cells.leishmania-seg.png`, `cells.leishmania-seg-labels.tif` and
+`cells.leishmania-seg-rois.zip`. Without `--out` the overlays go to a folder beside
+the input named after it and the model, `frames.leishmania-seg/`. A file-shaped path
+is refused rather than overwritten by every image in turn; `--sequence` is the way to
+ask for one stack across the folder.
 
 A number is taken by at most one instance of a class; a second of the same class in one
 cell is numbered after the last cell. A mask returning in two pieces contributes only

@@ -18,6 +18,9 @@ script appears here with no edit. Only settings moved off their default are pass
 the command is shown before it runs. Outputs are named from the output folder and the
 input's name: `cells.leishmania-seg.png`, `-labels.tif`, `-rois.zip`.
 
+A folder is one run per image in it, and the scripts name each image's outputs
+themselves, so for a folder the window hands them the output folder alone.
+
 The runner is this interpreter where it can already import what the script needs, else
 `uv run`, which reads the script's inline dependencies.
 """
@@ -324,7 +327,7 @@ class App:
                    command=self.pick_file).grid(row=0, column=2, padx=(6, 0))
         ttk.Button(files, text="folder...", width=9,
                    command=self.pick_input_folder).grid(row=0, column=3, padx=(4, 0))
-        ttk.Label(files, text="a stack, one image, or a folder taken in name order",
+        ttk.Label(files, text="a stack, one image, or a folder: one run per image in it",
                   foreground="#586069").grid(row=1, column=1, sticky="w", pady=(0, 6))
 
         ttk.Label(files, text="output").grid(row=2, column=0, sticky="e", padx=(0, 6))
@@ -610,7 +613,12 @@ class App:
 
     def output_argv(self) -> list:
         """The output paths, named from the output folder and the input's name:
-        `<folder>/<input stem>.<model>.png` and its two neighbours."""
+        `<folder>/<input stem>.<model>.png` and its two neighbours.
+
+        For a folder of images the scripts name each image's outputs themselves, so
+        they get the output folder alone -- unless --sequence runs the folder as one
+        movie, which is named after the folder like any one input.
+        """
         folder = self.folder.get().strip()
         image = self.image.get().strip()
         if not folder or not image or self.parser is None:
@@ -618,10 +626,14 @@ class App:
         stem = Path(image).stem or Path(image).name
         model = self.model_name()
         where = self.here(folder)
+        sequence = self.fields.get("sequence")
+        per_image = self.input_is_folder() and not (sequence is not None
+                                                    and sequence.get())
         command = []
         for name, suffix, _ in OUTPUT_SET:
             if self.wants[name].get() and f"--{name}" in self.parser._option_string_actions:
-                command += [f"--{name}", str(where / f"{stem}.{model}{suffix}")]
+                command += [f"--{name}", str(where if per_image
+                                             else where / f"{stem}.{model}{suffix}")]
         return command
 
     def here(self, path) -> Path:
@@ -644,6 +656,13 @@ class App:
         if chosen is not None and chosen.get().strip():
             return chosen.get().strip()
         return getattr(self.module(), "MODEL", self.script.get())
+
+    def input_is_folder(self) -> bool:
+        text = self.image.get().strip()
+        try:
+            return bool(text) and self.here(text).is_dir()
+        except (OSError, ValueError):  # half-typed, or not a path at all
+            return False
 
     # running it
 

@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "ultralytics",
+#     "ultralytics>=8.4.142",
 #     "tifffile",
 #     "roifile",
 #     "tqdm",
@@ -37,9 +37,9 @@ from pathlib import Path
 import numpy as np
 
 from fetch import fetch, on_disk
-from outputs import (Found, add_output_arguments, frame_count, parse_frames,
+from outputs import (Found, add_output_arguments, frame_count, parse_frames, runs_of,
                      progress, resolve_classes, say, writers_for)
-from run import run_frames
+from run import head_options, run_frames
 from tiling import (add_tiling_arguments, batches, imgsz_for, resolve_stitch,
                     scale_note, settings, tiling_hint)
 
@@ -61,6 +61,10 @@ def arguments() -> argparse.ArgumentParser:
                         help="override the imgsz the index records")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, mps, 0, ...")
+    parser.add_argument("--nms", type=float, default=None,
+                        help="run the model's one-to-many head through NMS at this "
+                             "IoU instead of its end-to-end head, which runs otherwise; "
+                             "the two keep different cells in a crowd")
     add_tiling_arguments(parser)
     add_output_arguments(parser)
     return parser
@@ -80,7 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     weights, entry = (on_disk(args.weights) if args.weights
                       else fetch(MODEL, args.version))
     tile, overlap = settings(entry, args.tile, args.overlap)
-    numbers = parse_frames(args.frames, frame_count(args.image))
+    name = MODEL if not args.weights else weights.stem
+    jobs = runs_of(args, name)
     device = None if args.device == "auto" else args.device
     model = YOLO(weights)
     recorded = (entry.get("config") or {}).get("keypoints") or {}
@@ -99,9 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         edges = [(index, index + 1) for index in range(count - 1)]
     classes = resolve_classes(model.names, args.classes)
 
-    writers = writers_for(args, args.image,
-                          MODEL if not args.weights else weights.stem,
-                          classes, numbers)
+    numbers: list = []  # the current run's frames; `announce` reads it
     # The one untiled result, kept so the epilogue can read per-node confidences off it.
     whole = {}
 
@@ -123,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
                                      leave=False):
             crops = [frame[y0:y1, x0:x1] for y0, x0, y1, x1 in group]
             results = model.predict(crops, imgsz=imgsz, conf=args.conf, device=device,
-                                    verbose=False)
+                                    verbose=False, **head_options(args.nms))
             for tile_index, ((y0, x0, _, _), result) in enumerate(zip(group, results),
                                                                   first):
                 if len(boxes) == 1:
@@ -154,8 +157,13 @@ def main(argv: list[str] | None = None) -> int:
             seen = "" if scores is None else f"  conf {scores[0][index]:.2f}"
             say(f"  {node:6s} ({x:7.1f}, {y:7.1f}){seen}")
 
-    run_frames(args.image, numbers, writers, predict, tile=tile, overlap=overlap,
-               how=how, announce=announce, epilogue=epilogue)
+    for job in progress(jobs, "images"):
+        numbers = parse_frames(args.frames, frame_count(job.image))
+        writers = writers_for(job, job.image, name, classes, numbers)
+        run_frames(job.image, numbers, writers, predict, tile=tile, overlap=overlap,
+                   how=how, announce=announce, item=job.item,
+                   # The node-by-node listing is for one frame looked at on its own.
+                   epilogue=epilogue if job.item is None else None)
     return 0
 
 

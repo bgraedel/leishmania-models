@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
-#     "ultralytics",
+#     "ultralytics>=8.4.142",
 #     "numpy",
 #     "pillow",
 #     "tifffile",
@@ -37,7 +37,7 @@ import argparse
 from pathlib import Path
 
 from fetch import fetch, load_image
-from outputs import frame_count, parse_frames, progress, resolve_classes, say
+from outputs import frame_count, parse_frames, progress, resolve_classes, runs_of, say
 from run import detect_tiles
 from tiling import (DEFAULT_OVERLAP, assign, cover, describe_cover, imgsz_for,
                     recorded_tile, settings, slices, stitch)
@@ -52,7 +52,8 @@ class Guide:
     """
 
     def __init__(self, version: str | None = None, conf: float = 0.25, pad: int = 32,
-                 device=None, batch: int = 4, model_id: str = MODEL):
+                 device=None, batch: int = 4, model_id: str = MODEL,
+                 nms: float | None = None):
         try:
             from ultralytics import YOLO
         except ImportError:
@@ -68,6 +69,7 @@ class Guide:
         # large frame, unrelated to the tiles being planned for the segmenter.
         self.tile, self.overlap = settings(self.entry, None, None)
         self.conf, self.pad, self.device, self.batch = conf, pad, device, batch
+        self.nms = nms  # --guide-nms; see run.head_options
 
     def boxes(self, frame) -> list:
         """Every cell the detector finds, as (x0, y0, x1, y1) in frame coordinates.
@@ -79,7 +81,7 @@ class Guide:
         found = detect_tiles(self.model, frame, grid,
                              imgsz_for(self.entry, frame.shape, self.tile),
                              self.conf, self.device, self.batch, self.names,
-                             bar=False)
+                             bar=False, nms=self.nms)
         # Deduplicated by overlap: ownership double-counts any cell longer than the
         # detector's own overlap, and `assign` would give each duplicate its own tile.
         return [item.box for item in stitch(found, grid, frame.shape, "merge")]
@@ -125,6 +127,10 @@ def add_guide_arguments(parser, switches: bool = True) -> None:
     group.add_argument("--guide-pad", type=int, default=32,
                        help="clear space in px around every cell inside its tile; "
                             "costs tiles where cells are long")
+    group.add_argument("--guide-nms", type=float, default=None,
+                       help="run the detector's one-to-many head through NMS at this "
+                            "IoU instead of its end-to-end head, which runs otherwise; "
+                            "the two keep different cells in a crowd. See --nms")
 
 
 def tiling_on(args, entry: dict, tile: int, overlap: float, fallback: int = 0,
@@ -152,7 +158,8 @@ def guide_from(args, device=None, batch: int = 4):
     """
     if not getattr(args, "guide", False):
         return None
-    return Guide(args.guide_version, args.guide_conf, args.guide_pad, device, batch)
+    return Guide(args.guide_version, args.guide_conf, args.guide_pad, device, batch,
+                 nms=args.guide_nms)
 
 
 def arguments() -> argparse.ArgumentParser:
@@ -176,16 +183,21 @@ def main(argv: list[str] | None = None) -> int:
     """`python guide.py cells.tif` -- the plan alone, before committing a long run."""
     args = arguments().parse_args(argv)
 
-    numbers = parse_frames(args.frames, frame_count(args.image))
+    jobs = runs_of(args, MODEL, writes=False)
     guide = Guide(args.guide_version, args.guide_conf, args.guide_pad,
-                  None if args.device == "auto" else args.device, args.batch)
-    for number in progress(numbers, "frames"):
-        frame = load_image(args.image, number)
-        tiles, note, _ = guide.plan(frame, args.tile, args.overlap)
-        say(f"frame {number}: {note}")
-        if tiles and len(numbers) == 1:
-            for y0, x0, y1, x1 in tiles:
-                say(f"  ({x0}, {y0}) - ({x1}, {y1})")
+                  None if args.device == "auto" else args.device, args.batch,
+                  nms=args.guide_nms)
+    for job in progress(jobs, "images"):
+        numbers = parse_frames(args.frames, frame_count(job.image))
+        head = ("" if job.item is None
+                else f"[{job.item[0] + 1}/{job.item[1]}] {job.image.name}, ")
+        for number in progress(numbers, "frames", leave=job.item is None):
+            frame = load_image(job.image, number)
+            tiles, note, _ = guide.plan(frame, args.tile, args.overlap)
+            say(f"{head}frame {number}: {note}")
+            if tiles and len(numbers) == 1 and job.item is None:
+                for y0, x0, y1, x1 in tiles:
+                    say(f"  ({x0}, {y0}) - ({x1}, {y1})")
     return 0
 
 

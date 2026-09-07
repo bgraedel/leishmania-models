@@ -4,7 +4,7 @@
 # dependencies = [
 #     "cellpose>=4.0.1",
 #     # --guide places tiles with the detector, an ultralytics checkpoint.
-#     "ultralytics",
+#     "ultralytics>=8.4.142",
 #     "numpy",
 #     "scipy",
 #     "pillow",
@@ -66,7 +66,7 @@ import numpy as np
 from fetch import fetch
 from guide import add_guide_arguments, guide_from, tiling_on
 from outputs import (Found, add_mask_arguments, add_output_arguments, cleanup_from,
-                     frame_count, instance_mask, parse_frames, progress,
+                     frame_count, instance_mask, parse_frames, progress, runs_of,
                      resolve_classes, say, writers_for)
 from run import pick_device, run_frames
 from tiling import (DEFAULT_OVERLAP, add_stitch_argument, resolve_stitch, settings)
@@ -356,7 +356,8 @@ def main(argv: list[str] | None = None) -> int:
     values, source = resolved(entry, args)
     tile, overlap = settings(entry, args.tile, args.overlap)
     tile, overlap = tiling_on(args, entry, tile, overlap, GUIDE_TILE)
-    numbers = parse_frames(args.frames, frame_count(args.image))
+    name = args.id if not args.weights else Path(weights).stem
+    jobs = runs_of(args, name)
     how = resolve_stitch(args.stitch, args.guide)
     device = pick_device(args.device)
 
@@ -399,9 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                   tile_overlap=float(values["block_overlap"]),
                   bsize=int(values["bsize"]) or None)
 
-    writers = writers_for(
-        args, args.image,
-        args.id if not args.weights else Path(weights).stem, classes, numbers)
+    numbers: list = []  # the current run's frames; `announce` reads it
 
     def announce(frame, boxes):
         # Recomputed here: one percentile over one frame, and only the first is
@@ -439,8 +438,12 @@ def main(argv: list[str] | None = None) -> int:
             found += instances(masks, prob, (y0, x0), index, name, cleanup)
         return found
 
-    run_frames(args.image, numbers, writers, predict, tile=tile, overlap=overlap,
-               how=how, guide=guide, strict=args.guide_strict, announce=announce)
+    for job in progress(jobs, "images"):
+        numbers = parse_frames(args.frames, frame_count(job.image))
+        writers = writers_for(job, job.image, name, classes, numbers)
+        run_frames(job.image, numbers, writers, predict, tile=tile, overlap=overlap,
+                   how=how, guide=guide, strict=args.guide_strict, announce=announce,
+                   item=job.item)
     return 0
 
 
